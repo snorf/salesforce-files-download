@@ -1,94 +1,144 @@
 from simple_salesforce import Salesforce
 import requests
 import os.path
+import csv
 
+def split_into_batches(l, n):
+    
+    full_list = list(l)
+    for i in range(0, len(full_list), n):
+        yield full_list[i:i + n]
+        
+def create_filename(title, file_extension, content_document_id, output_directory):
+    
+    #Create filename
+    bad_chars = [';', ':', '!', "*", '/', '\\']
+    clean_title = filter(lambda i: i not in bad_chars, title)
+    clean_title = ''.join(list(clean_title))
+    filename = "{0}{1} {2}.{3}".format(output_directory, content_document_id, clean_title, file_extension)
+    return filename
+        
 
-def get_content_document_ids(sf, query):
+def get_content_document_ids(sf, output_directory, query):
+    
+    #Locate/Create output directory
+    if not os.path.isdir(output_directory):
+        os.mkdir(output_directory)
+    
+    results_path = output_directory + 'files.csv'
     content_document_ids = set()
     content_documents = sf.query_all(query)
-    for content_document in content_documents["records"]:
-        content_document_ids.add(content_document["ContentDocumentId"])
+    
+    #Save results file with file mapping and return ids
+    with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
+        filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        filewriter.writerow(['GrantorId', 'ContentDocumentId', 'Filepath'])
+    
+        for content_document in content_documents["records"]:
+            
+            content_document_ids.add(content_document["ContentDocumentId"])
+            filename = create_filename(content_document["ContentDocument"]["Title"], 
+                                       content_document["ContentDocument"]["FileExtension"], 
+                                       content_document["ContentDocumentId"], 
+                                       output_directory)
+            
+            filewriter.writerow([ content_document["LinkedEntityId"], content_document["ContentDocumentId"], filename])
+            
     return content_document_ids
 
 
 def fetch_files(sf, query_string, output_directory, valid_content_document_ids=None):
-    query_response = sf.query(query_string)
+    
+    #Divide the full list of files into batches of 100 ids
+    batches = list(split_into_batches(valid_content_document_ids, 100))
+    
+    i = 0
+    for batch in batches:
+        
+        i = i + 1
+        print('')
+        print("Processing batch {0}".format(i))
+        batch_query = query_string + ' AND ContentDocumentId in (' + ",".join("'" + item + "'" for item in batch) + ')'
+        query_response = sf.query(batch_query)
+        batch_size = len(query_response["records"])
+        print("Content Version Query found {0} results".format(batch_size))
 
-    files = 0
-    already_downloaded = 0
-    existing_filenames = {}
-    if not os.path.isdir(output_directory):
-        os.mkdir(output_directory)
-    while query_response:
-        for r in query_response["records"]:
-            content_document_id = r["ContentDocumentId"]
-            title = r["Title"]
+        while query_response:
 
-            filename = "%s/%s" % (output_directory, title)
-            url = "https://%s%s" % (sf.sf_instance, r["VersionData"])
-            created_date = r["CreatedDate"]
-            if valid_content_document_ids and content_document_id not in valid_content_document_ids:
-                print "Ignoring (%s) %s" % (content_document_id, title)
-                continue
-            if not os.path.isfile(filename):
-                response = requests.get(url, headers={"Authorization": "OAuth " + sf.session_id,
-                                                      "Content-Type": "application/octet-stream"})
+            extracted = 0
+            
+            for r in query_response["records"]:
+
+                #Create filename
+                filename = create_filename(r["Title"], r["FileExtension"], r["ContentDocumentId"], output_directory)
+                
+                #Download file
+                url = "https://%s%s" % (sf.sf_instance, r["VersionData"])
+                print("Downloading from " + url)
+                response = requests.get(url, headers={"Authorization": "OAuth " + sf.session_id, "Content-Type": "application/octet-stream"})
+
                 if response.ok:
-                    print "Saving %s" % title
+                    #Save File
                     with open(filename, "wb") as output_file:
                         output_file.write(response.content)
-                    existing_filenames[title] = created_date
-                    files += 1
+                    print("Saved file to %s" % filename)
                 else:
-                    print "Couldn't download %s" % title
-            else:
-                if title not in existing_filenames:
-                    existing_filenames[title] = created_date
-                else:
-                    print "%s (%s) already in list (%s)" % (title, existing_filenames[title], created_date)
-                already_downloaded += 1
-        if "nextRecordsUrl" in query_response:
-            next_records_identifier = query_response["nextRecordsUrl"]
-            query_response = sf.query_more(next_records_identifier=next_records_identifier, identifier_is_url=True)
-        else:
-            print "%d files downloaded" % files
-            print "%d already downloaded" % already_downloaded
-            break
-
+                    print("Couldn't download %s" % url)
+                    
+                extracted += 1
+                print("{0}/{1} complete".format(extracted, batch_size))
+            
+            break;
+        
+        print('All files in batch {0} downloaded'.format(i))
+        print('')
+        
+    print('All batches complete')
+            
 
 def main():
+    
     import argparse
+    import configparser
 
     parser = argparse.ArgumentParser(description='Export ContentVersion (Files) from Salesforce')
-    parser.add_argument('-u', '--user', metavar='username', required=True,
-                        help='Your Salesforce username')
-    parser.add_argument('-p', '--password', metavar='password', required=True,
-                        help='Your Salesforce password')
-    parser.add_argument('-t', '--token', metavar='security_token', required=True,
-                        help='Your Security Token')
-    parser.add_argument('-sb', '--sandbox', metavar='sandbox', required=False, default='True',
-                        help='is this a sandbox instance?')
-    parser.add_argument('-q', '--query', metavar='query', required=True,
-                        help='SOQL query (has to contain Title and VersionData and SELECT FROM ContentVersion)')
-    parser.add_argument('-cdq', '--content_document_query', metavar='cdqquery', required=False,
-                        help='SOQL to limit the valid ContentDocumentIds, if this is set you need ContentDocumentId '
-                             'in your ContentVersion query')
-    parser.add_argument('-o', '--output', required=False, default='output',
-                        help='Specify output directory')
+    parser.add_argument('-q', '--query', metavar='query', required=True, help='SOQL to limit the valid ContentDocumentIds. Must return the Id of related/parent objects.')
     args = parser.parse_args()
-
+    
+    #Get settings from config file
+    config = configparser.ConfigParser()
+    config.read('download.ini')
+    
+    username = config['salesforce']['username']
+    password = config['salesforce']['password']
+    token = config['salesforce']['security_token']
+    is_sandbox = config['salesforce']['connect_to_sandbox']
+    content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, ContentDocument.Title, ContentDocument.FileExtension FROM ContentDocumentLink WHERE LinkedEntityId in ({0})'.format(args.query)
+    output = config['salesforce']['output_dir']
+    query = "SELECT ContentDocumentId, Title, VersionData, CreatedDate, FileExtension FROM ContentVersion WHERE IsLatest = True AND FileExtension != 'snote'";
+    
     domain = None
-    if args.sandbox == 'True':
-        domain = 'test'
+    if is_sandbox == 'True':
+        domain = 'test';
+        
+    #Output
+    print('Export ContentVersion (Files) from Salesforce')
+    print('Username: ' + username)
+    print('Output directory: ' + output)
 
-    sf = Salesforce(username=args.user, password=args.password,
-                    security_token=args.token, domain=domain)
+    #Connect
+    sf = Salesforce(username=username, password=password, security_token=token, domain=domain)
+    print("Connected successfully to {0}".format(sf.sf_instance))
 
+    #Get Content Document Ids
+    print("Querying to get Content Document Ids...")
     valid_content_document_ids = None
-    if args.content_document_query:
-        valid_content_document_ids = get_content_document_ids(sf=sf, query=args.content_document_query)
+    if content_document_query:
+        valid_content_document_ids = get_content_document_ids(sf=sf, output_directory=output, query=content_document_query)
+    print("Found {0} total files".format(len(valid_content_document_ids)))
 
-    fetch_files(sf=sf, query_string=args.query, valid_content_document_ids=valid_content_document_ids, output_directory=args.output)
+    #Begin Downloads
+    fetch_files(sf=sf, query_string=query, valid_content_document_ids=valid_content_document_ids, output_directory=output)
 
 
 if __name__ == "__main__":
