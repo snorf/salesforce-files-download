@@ -4,4 +4,5 @@ password =
 security_token = 
 connect_to_sandbox = False
 output_dir = C:\Files_Extract\
-content_document_query_string = SELECT ContentDocumentId FROM ContentDocumentLink WHERE LinkedEntityId in 
+batch_size = 100
+loglevel = INFO
