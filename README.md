@@ -1,6 +1,11 @@
 # salesforce-files-download
 
 Python script to download Salesforce Files (aka ContentDocument).
+It's using ProcessPoolExecutor to run downloads in parallell which 
+makes the experience nicer if you have a large number of files.
+
+In a very non scientific test 1614 files (3.23 GB) were downloaded 
+in under 6 minutes.
 
 ## Getting Started
 

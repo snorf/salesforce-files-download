@@ -6,10 +6,10 @@ import csv
 import logging
 
 
-def split_into_batches(l, n):
-    full_list = list(l)
-    for i in range(0, len(full_list), n):
-        yield full_list[i:i + n]
+def split_into_batches(items, batch_size):
+    full_list = list(items)
+    for i in range(0, len(full_list), batch_size):
+        yield full_list[i:i + batch_size]
 
 
 def create_filename(title, file_extension, content_document_id, output_directory):
@@ -82,7 +82,6 @@ def fetch_files(sf, query_string, output_directory, valid_content_document_ids=N
         logging.debug("Content Version Query found {0} results".format(records_to_process))
 
         while query_response:
-            extracted = 0
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 args = ((record, output_directory, sf) for record in query_response["records"])
                 for result in executor.map(download_file, args):
@@ -99,7 +98,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Export ContentVersion (Files) from Salesforce')
     parser.add_argument('-q', '--query', metavar='query', required=True,
-                        help='SOQL to limit the valid ContentDocumentIds. Must return the Id of related/parent objects.')
+                        help='SOQL to limit the valid ContentDocumentIds. Must return the Ids of parent objects.')
     args = parser.parse_args()
 
     # Get settings from config file
@@ -114,14 +113,15 @@ def main():
     loglevel = logging.getLevelName(config['salesforce']['loglevel'])
     logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=loglevel)
 
-    content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, ContentDocument.Title, ContentDocument.FileExtension FROM ContentDocumentLink WHERE LinkedEntityId in ({0})'.format(
-        args.query)
+    content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, ContentDocument.Title, ' \
+                             'ContentDocument.FileExtension FROM ContentDocumentLink ' \
+                             'WHERE LinkedEntityId in ({0})'.format(args.query)
     output = config['salesforce']['output_dir']
-    query = "SELECT ContentDocumentId, Title, VersionData, CreatedDate, FileExtension FROM ContentVersion WHERE IsLatest = True AND FileExtension != 'snote'";
-
+    query = "SELECT ContentDocumentId, Title, VersionData, FileExtension FROM ContentVersion " \
+            "WHERE IsLatest = True AND FileExtension != 'snote'"
     domain = None
     if is_sandbox == 'True':
-        domain = 'test';
+        domain = 'test'
 
     # Output
     logging.info('Export ContentVersion (Files) from Salesforce')
