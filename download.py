@@ -46,7 +46,7 @@ def get_content_document_ids(sf, output_directory, query):
     # Save results file with file mapping and return ids
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-        filewriter.writerow(['LinkedEntityId','LinkedEntity Name', 'ContentDocumentId', 'ContentDocument Title', 'Local file path'])
+        filewriter.writerow(['FirstPublicationId','FirstPublicationName', 'ContentDocumentId', 'Title','VersionData','PathOnClient'])
 
         for content_document in content_documents["records"]:
             content_document_ids.add(content_document["ContentDocumentId"])
@@ -57,7 +57,7 @@ def get_content_document_ids(sf, output_directory, query):
 
             filewriter.writerow(
                 [content_document["LinkedEntityId"], content_document["LinkedEntity"]["Name"], content_document["ContentDocumentId"],
-                 content_document["ContentDocument"]["Title"], filename])
+                 content_document["ContentDocument"]["Title"], filename, filename])
 
     return content_document_ids
 
