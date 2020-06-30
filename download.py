@@ -1,10 +1,10 @@
 import concurrent.futures
 from simple_salesforce import Salesforce
 import requests
-import os.path
+import os
 import csv
+import re
 import logging
-import sys
 
 def split_into_batches(items, batch_size):
     full_list = list(items)
@@ -14,9 +14,22 @@ def split_into_batches(items, batch_size):
 
 def create_filename(title, file_extension, content_document_id, output_directory):
     # Create filename
-    bad_chars = [';', ':', '!', "*", '/', '\\']
-    clean_title = filter(lambda i: i not in bad_chars, title)
-    clean_title = ''.join(list(clean_title))
+    if ( os.name == 'nt') :
+        # on windows, this is harder 
+        # see https://stackoverflow.com/questions/295135/turn-a-string-into-a-valid-filename
+
+        bad_chars= re.compile(r'[^A-Za-z0-9_. ]+|^\.|\.$|^ | $|^$')
+        bad_names= re.compile(r'(aux|com[1-9]|con|lpt[1-9]|prn)(\.|$)')
+        clean_title = bad_chars.sub('_', title)
+        if bad_names.match(clean_title) :
+            clean_title = '_'+clean_title
+
+    else :
+
+        bad_chars = [';', ':', '!', "*", '/', '\\']
+        clean_title = filter(lambda i: i not in bad_chars, title)
+        clean_title = ''.join(list(clean_title))
+
     filename = "{0}{1} {2}.{3}".format(output_directory, content_document_id, clean_title, file_extension)
     return filename
 
@@ -33,7 +46,7 @@ def get_content_document_ids(sf, output_directory, query):
     # Save results file with file mapping and return ids
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-        filewriter.writerow(['FirstPublishLocationId', 'ContentDocumentId', 'VersionData', 'PathOnClient', 'Title'])
+        filewriter.writerow(['LinkedEntityId','LinkedEntity Name', 'ContentDocumentId', 'ContentDocument Title', 'Local file path'])
 
         for content_document in content_documents["records"]:
             content_document_ids.add(content_document["ContentDocumentId"])
@@ -43,8 +56,8 @@ def get_content_document_ids(sf, output_directory, query):
                                        output_directory)
 
             filewriter.writerow(
-                [content_document["LinkedEntityId"], content_document["ContentDocumentId"], filename, filename,
-                 content_document["ContentDocument"]["Title"]])
+                [content_document["LinkedEntityId"], content_document["LinkedEntity"]["Name"], content_document["ContentDocumentId"],
+                 content_document["ContentDocument"]["Title"], filename])
 
     return content_document_ids
 
@@ -120,7 +133,7 @@ def main():
     loglevel = logging.getLevelName(config['salesforce']['loglevel'])
     logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=loglevel)
 
-    content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, ContentDocument.Title, ' \
+    content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, LinkedEntity.Name, ContentDocument.Title, ' \
                              'ContentDocument.FileExtension FROM ContentDocumentLink ' \
                              'WHERE LinkedEntityId in ({0})'.format(args.query)
     output = config['salesforce']['output_dir']
