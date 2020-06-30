@@ -2,7 +2,11 @@
 username = 
 password = 
 security_token = 
+
 connect_to_sandbox = False
+# if you don't have a custom domain leave this blank
+domain =
+
 output_dir = C:\Files_Extract\
 batch_size = 100
 loglevel = INFO

@@ -4,7 +4,7 @@ import requests
 import os.path
 import csv
 import logging
-
+import sys
 
 def split_into_batches(items, batch_size):
     full_list = list(items)
@@ -102,12 +102,19 @@ def main():
     args = parser.parse_args()
 
     # Get settings from config file
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(allow_no_value=True)
     config.read('download.ini')
 
     username = config['salesforce']['username']
     password = config['salesforce']['password']
     token = config['salesforce']['security_token']
+
+    domain = config['salesforce']['domain']
+    if domain :
+        domain += '.my'
+    else :
+        domain = 'login'
+    
     batch_size = int(config['salesforce']['batch_size'])
     is_sandbox = config['salesforce']['connect_to_sandbox']
     loglevel = logging.getLevelName(config['salesforce']['loglevel'])
@@ -119,13 +126,14 @@ def main():
     output = config['salesforce']['output_dir']
     query = "SELECT ContentDocumentId, Title, VersionData, FileExtension FROM ContentVersion " \
             "WHERE IsLatest = True AND FileExtension != 'snote'"
-    domain = None
+
     if is_sandbox == 'True':
         domain = 'test'
 
     # Output
     logging.info('Export ContentVersion (Files) from Salesforce')
     logging.info('Username: ' + username)
+    logging.info('Signing in at: https://'+ domain + '.salesforce.com')
     logging.info('Output directory: ' + output)
 
     # Connect
@@ -144,6 +152,6 @@ def main():
     fetch_files(sf=sf, query_string=query, valid_content_document_ids=valid_content_document_ids,
                 output_directory=output, batch_size=batch_size)
 
-
+    
 if __name__ == "__main__":
     main()
