@@ -11,15 +11,16 @@ import threading
 # entries to the csv as they're downloaded 
 csv_writer_lock = threading.Lock()
 
+
 def split_into_batches(items, batch_size):
     full_list = list(items)
     for i in range(0, len(full_list), batch_size):
         yield full_list[i:i + batch_size]
 
 
-def create_filename(title, file_extension, content_document_id, output_directory):
+def create_filename(title, file_extension, content_document_id, output_directory, filename_pattern):
     # Create filename
-    if ( os.name == 'nt') :
+    if os.name == 'nt':
         # on windows, this is harder 
         # see https://stackoverflow.com/questions/295135/turn-a-string-into-a-valid-filename
 
@@ -35,7 +36,7 @@ def create_filename(title, file_extension, content_document_id, output_directory
         clean_title = filter(lambda i: i not in bad_chars, title)
         clean_title = ''.join(list(clean_title))
 
-    filename = "{0}{1} {2}.{3}".format(output_directory, content_document_id, clean_title, file_extension)
+    filename = filename_pattern.format(output_directory, content_document_id, clean_title, file_extension)
     return filename
 
 
@@ -57,15 +58,15 @@ def get_content_document_ids(sf, output_directory, query):
 
 def download_file(args):
 
-    record, output_directory, sf, results_path, content_document_links = args
+    record, output_directory, sf, results_path, content_document_links, content_document_id_name, filename_pattern = args
 
     content_document_id = record["ContentDocumentId"]
     title = record["Title"]
     file_extension = record["FileExtension"]
 
-    content_document_link = next( (cdl for cdl in content_document_links if cdl["ContentDocumentId"] == content_document_id), None)
-    linked_entity_id = content_document_link["LinkedEntityId"]
-    linked_entity_name = content_document_link["LinkedEntity"]["Name"]
+    content_document_link = next( (cdl for cdl in content_document_links if cdl[content_document_id_name] == content_document_id), None)
+    linked_entity_id = content_document_link["LinkedEntityId"] if "LinkedEntityId" in content_document_link else content_document_link["Id"]
+    linked_entity_name = content_document_link["LinkedEntity"]["Name"] if "LinkedEntity" in content_document_link else content_document_link["Title"]
 
     url = "https://%s%s" % (sf.sf_instance, record["VersionData"])
 
@@ -74,15 +75,17 @@ def download_file(args):
                                           "Content-Type": "application/octet-stream"})
     if response.ok:
         # Save File
-        filename = create_filename(title, file_extension, content_document_id, output_directory)
+        filename = create_filename(title, file_extension, content_document_id, output_directory,
+                                   filename_pattern=filename_pattern)
         with open(filename, "wb") as output_file:
             output_file.write(response.content)
 
             # write file entry to csv
             csv_writer_lock.acquire()
             with open(results_path, 'a', encoding='UTF-8', newline='') as results_csv:
-                filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)   
-                filewriter.writerow([linked_entity_id, linked_entity_name, content_document_id , title, filename, filename])
+                filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+                filewriter.writerow([linked_entity_id, linked_entity_name, content_document_id , title,
+                                     filename, filename])
             csv_writer_lock.release()
 
         return "Saved file to %s" % filename
@@ -90,8 +93,9 @@ def download_file(args):
         return "Couldn't download %s" % url
 
 
-def fetch_files(sf, content_document_links=None, output_directory=None, results_path=None, batch_size=100):
-    
+def fetch_files(sf, content_document_links=None, output_directory=None, results_path=None,
+                filename_pattern=None, content_document_id_name='ContentDocumentId', batch_size=100):
+
     # Divide the full list of files into batches of 100 ids
     batches = list(split_into_batches(content_document_links, batch_size))
 
@@ -100,18 +104,19 @@ def fetch_files(sf, content_document_links=None, output_directory=None, results_
 
         i = i + 1
         logging.info("Processing batch {0}/{1}".format(i, len(batches)))
-        
+
         query_string = "SELECT ContentDocumentId, Title, VersionData, FileExtension FROM ContentVersion " \
             "WHERE IsLatest = True AND FileExtension != 'snote'"
-        batch_query = query_string + ' AND ContentDocumentId in (' + ",".join("'" + item["ContentDocumentId"] + "'" for item in batch) + ')'
+        batch_query = query_string + ' AND ContentDocumentId in (' + ",".join("'" + item[content_document_id_name] + "'" for item in batch) + ')'
         query_response = sf.query(batch_query)
         records_to_process = len(query_response["records"])
         logging.debug("Content Version Query found {0} results".format(records_to_process))
 
         while query_response:
             with concurrent.futures.ProcessPoolExecutor() as executor:
-                args = ((record, output_directory, sf, results_path, batch) for record in query_response["records"])
-                
+                args = ((record, output_directory, sf, results_path, batch, content_document_id_name, filename_pattern)
+                        for record in query_response["records"])
+
                 for result in executor.map(download_file, args):
                     logging.debug(result)
             break
@@ -129,6 +134,14 @@ def main():
     parser = argparse.ArgumentParser(description='Export ContentVersion (Files) from Salesforce')
     parser.add_argument('-q', '--query', metavar='query', required=True,
                         help='SOQL to limit the valid ContentDocumentIds. Must return the Ids of parent objects.')
+    parser.add_argument('-o', '--object', metavar='object', required=False, default='ContentDocumentLink',
+                        help='How are the ContentDocument selected, via \'ContentDocumentLink\' (default) or '
+                             'directly from \'ContentDocument\'')
+    parser.add_argument('-f', '--filenamepattern', metavar='filenamepattern', required=False, default='{0}{1}-{2}.{3}',
+                        help='Specify the filename pattern for the output, available values are:'
+                             '{0} = output_directory, {1} = content_document_id, {2} title, {3} file_extension, '
+                             'Default value is: {0}{1}-{2}.{3} which will be '
+                             '/path/ContentDocumentId-Title.fileExtension')
     args = parser.parse_args()
 
     # Get settings from config file
@@ -141,18 +154,18 @@ def main():
 
     is_sandbox = config['salesforce']['connect_to_sandbox']
     if is_sandbox == 'True':
-        domain = 'test'    
+        domain = 'test'
 
     # custom domain overrides "test" in case of sandbox
     domain = config['salesforce']['domain']
-    if domain :
+    if domain:
         domain += '.my'
-    else :
+    else:
         domain = 'login'
-    
+
     output_directory = config['salesforce']['output_dir']
     batch_size = int(config['salesforce']['batch_size'])
-    loglevel = logging.getLevelName(config['salesforce']['loglevel'])  
+    loglevel = logging.getLevelName(config['salesforce']['loglevel'])
 
     # Setup logging
     logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=loglevel)
@@ -160,7 +173,7 @@ def main():
     logging.info('Export ContentVersion (Files) from Salesforce')
     logging.info('Username: ' + username)
     logging.info('Signing in at: https://'+ domain + '.salesforce.com')
-    
+
     # Connect to Salesforce
     sf = Salesforce(username=username, password=password, security_token=token, domain=domain)
     logging.debug("Connected successfully to {0}".format(sf.sf_instance))
@@ -169,24 +182,34 @@ def main():
     logging.info('Output directory: ' + output_directory)
     if not os.path.isdir(output_directory):
         os.mkdir(output_directory)
-    results_path = output_directory + 'files.csv'    
+    results_path = output_directory + 'files.csv'
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-        filewriter.writerow(['FirstPublicationId','FirstPublicationName', 'ContentDocumentId', 'Title','VersionData','PathOnClient'])
+        filewriter.writerow(['FirstPublicationId', 'FirstPublicationName', 'ContentDocumentId', 'Title',
+                             'VersionData', 'PathOnClient'])
 
     # retrieve all the ContentDocumentLinks for content documents we're going to download
     logging.info("Querying to get Content Document Ids...")
-    content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, LinkedEntity.Name, ContentDocument.Title, ' \
-                             'ContentDocument.FileExtension FROM ContentDocumentLink ' \
-                             'WHERE LinkedEntityId in ({0})'.format(args.query)    
+    if args.object == 'ContentDocumentLink':
+        content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, LinkedEntity.Name, ContentDocument.Title, ' \
+                                 'ContentDocument.FileExtension FROM ContentDocumentLink ' \
+                                 'WHERE LinkedEntityId in ({0})'.format(args.query)
+        content_document_id_name = 'ContentDocumentId'
+    elif args.object == 'ContentDocument':
+        content_document_query = 'SELECT Id, Title, FileExtension FROM ContentDocument {0}'.format(args.query).strip()
+        content_document_id_name = 'Id'
+    else:
+        raise 'Invalid QueryType %s' % args.queryType
 
     content_document_links = sf.query_all(content_document_query)["records"]
     logging.info("Found {0} total files".format(len(content_document_links)))
 
     # Begin Downloads
     global_lock = threading.Lock()
-    fetch_files(sf=sf, content_document_links=content_document_links, output_directory=output_directory, results_path=results_path, batch_size=batch_size)
+    fetch_files(sf=sf, content_document_links=content_document_links, output_directory=output_directory,
+                results_path=results_path, batch_size=batch_size, content_document_id_name=content_document_id_name,
+                filename_pattern=args.filenamepattern)
 
-    
+
 if __name__ == "__main__":
     main()
