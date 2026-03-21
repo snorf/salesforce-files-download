@@ -1,215 +1,431 @@
-import concurrent.futures
-from simple_salesforce import Salesforce
-import requests
-import os
 import csv
-import re
+import asyncio
+import os
+import sys
+import configparser
+import shutil
 import logging
-import threading
+import argparse
+import subprocess
+from typing import Dict, Any, List, Tuple
 
-# a global lock used by the batch file downloader to write
-# entries to the csv as they're downloaded 
-csv_writer_lock = threading.Lock()
+from rich.table import Table
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.progress import Progress, BarColumn, TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn, TextColumn
 
+csv_file = 'object_mapping.csv'
+download_script = 'download_functions.py'
+config_path = 'config.ini'
 
-def split_into_batches(items, batch_size):
-    full_list = list(items)
-    for i in range(0, len(full_list), batch_size):
-        yield full_list[i:i + batch_size]
-
-
-def create_filename(title, file_extension, content_document_id, output_directory, filename_pattern):
-    # Create filename
-    if os.name == 'nt':
-        # on windows, this is harder 
-        # see https://stackoverflow.com/questions/295135/turn-a-string-into-a-valid-filename
-
-        bad_chars= re.compile(r'[^A-Za-z0-9_. ]+|^\.|\.$|^ | $|^$')
-        bad_names= re.compile(r'(aux|com[1-9]|con|lpt[1-9]|prn)(\.|$)')
-        clean_title = bad_chars.sub('_', title)
-        if bad_names.match(clean_title) :
-            clean_title = '_'+clean_title
-
-    else :
-
-        bad_chars = [';', ':', '!', "*", '/', '\\']
-        clean_title = filter(lambda i: i not in bad_chars, title)
-        clean_title = ''.join(list(clean_title))
-
-    filename = filename_pattern.format(output_directory, content_document_id, clean_title, file_extension)
-    return filename
+# --- Granular logging setup ---
+LOG_FILE = 'download.log'
+logging.basicConfig(
+    filename=LOG_FILE,
+    filemode='a',
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 
-def get_content_document_ids(sf, output_directory, query):
-
-    results_path = output_directory + 'files.csv'
-    content_document_ids = set()
-    content_documents = sf.query_all(query)
-
-    for content_document in content_documents["records"]:
-        content_document_ids.add(content_document["ContentDocumentId"])
-        filename = create_filename(content_document["ContentDocument"]["Title"],
-                                    content_document["ContentDocument"]["FileExtension"],
-                                    content_document["ContentDocumentId"],
-                                    output_directory)
-
-    return content_document_ids
-
-
-def download_file(args):
-
-    record, output_directory, sf, results_path, content_document_links, content_document_id_name, filename_pattern = args
-
-    content_document_id = record["ContentDocumentId"]
-    title = record["Title"]
-    file_extension = record["FileExtension"]
-
-    content_document_link = next( (cdl for cdl in content_document_links if cdl[content_document_id_name] == content_document_id), None)
-    linked_entity_id = content_document_link["LinkedEntityId"] if "LinkedEntityId" in content_document_link else content_document_link["Id"]
-    linked_entity_name = content_document_link["LinkedEntity"]["Name"] if "LinkedEntity" in content_document_link else content_document_link["Title"]
-
-    url = "https://%s%s" % (sf.sf_instance, record["VersionData"])
-
-    logging.debug("Downloading from " + url)
-    response = requests.get(url, headers={"Authorization": "OAuth " + sf.session_id,
-                                          "Content-Type": "application/octet-stream"})
-    if response.ok:
-        # Save File
-        filename = create_filename(title, file_extension, content_document_id, output_directory,
-                                   filename_pattern=filename_pattern)
-        with open(filename, "wb") as output_file:
-            output_file.write(response.content)
-
-            # write file entry to csv
-            csv_writer_lock.acquire()
-            with open(results_path, 'a', encoding='UTF-8', newline='') as results_csv:
-                filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-                filewriter.writerow([linked_entity_id, linked_entity_name, content_document_id , title,
-                                     filename, filename])
-            csv_writer_lock.release()
-
-        return "Saved file to %s" % filename
-    else:
-        return "Couldn't download %s" % url
-
-
-def fetch_files(sf, content_document_links=None, output_directory=None, results_path=None,
-                filename_pattern=None, content_document_id_name='ContentDocumentId', batch_size=100):
-
-    # Divide the full list of files into batches of 100 ids
-    batches = list(split_into_batches(content_document_links, batch_size))
-
-    i = 0
-    for batch in batches:
-
-        i = i + 1
-        logging.info("Processing batch {0}/{1}".format(i, len(batches)))
-
-        query_string = "SELECT ContentDocumentId, Title, VersionData, FileExtension FROM ContentVersion " \
-            "WHERE IsLatest = True AND FileExtension != 'snote'"
-        batch_query = query_string + ' AND ContentDocumentId in (' + ",".join("'" + item[content_document_id_name] + "'" for item in batch) + ')'
-        query_response = sf.query(batch_query)
-        records_to_process = len(query_response["records"])
-        logging.debug("Content Version Query found {0} results".format(records_to_process))
-
-        while query_response:
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                args = ((record, output_directory, sf, results_path, batch, content_document_id_name, filename_pattern)
-                        for record in query_response["records"])
-
-                for result in executor.map(download_file, args):
-                    logging.debug(result)
-            break
-
-        logging.debug('All files in batch {0} downloaded'.format(i))
-    logging.debug('All batches complete')
-
-
-def main():
-    import argparse
-    import configparser
-    import threading
-
-    # Process command line arguments
-    parser = argparse.ArgumentParser(description='Export ContentVersion (Files) from Salesforce')
-    parser.add_argument('-q', '--query', metavar='query', required=True,
-                        help='SOQL to limit the valid ContentDocumentIds. Must return the Ids of parent objects.')
-    parser.add_argument('-o', '--object', metavar='object', required=False, default='ContentDocumentLink',
-                        help='How are the ContentDocument selected, via \'ContentDocumentLink\' (default) or '
-                             'directly from \'ContentDocument\'')
-    parser.add_argument('-f', '--filenamepattern', metavar='filenamepattern', required=False, default='{0}{1}-{2}.{3}',
-                        help='Specify the filename pattern for the output, available values are:'
-                             '{0} = output_directory, {1} = content_document_id, {2} title, {3} file_extension, '
-                             'Default value is: {0}{1}-{2}.{3} which will be '
-                             '/path/ContentDocumentId-Title.fileExtension')
-    args = parser.parse_args()
-
-    # Get settings from config file
+def load_config(config_path: str = config_path) -> configparser.ConfigParser:
+    """
+    Loads the configuration file.
+    """
     config = configparser.ConfigParser(allow_no_value=True)
-    config.read('download.ini')
+    config.read(config_path)
+    return config
 
-    username = config['salesforce']['username']
-    password = config['salesforce']['password']
-    token = config['salesforce']['security_token']
 
-    is_sandbox = config['salesforce']['connect_to_sandbox']
-    if is_sandbox == 'True':
-        domain = 'test'
+def preflight_checks(mode: str = 'batch') -> None:
+    """
+    Ensures all necessary files and directories exist and are readable.
+    """
+    errors = []
+    if not os.path.isfile(download_script):
+        errors.append(f"Download script not found: {download_script}")
+    if mode == 'batch' and not os.path.isfile(csv_file):
+        errors.append(f"Object mapping CSV not found: {csv_file}")
+    if not os.path.isfile(config_path):
+        errors.append(f"Config file not found: {config_path}")
+    if errors:
+        for e in errors:
+            print(f"[red]{e}[/red]")
+            logger.error(e)
+        sys.exit(1)
 
-    # custom domain overrides "test" in case of sandbox
-    domain = config['salesforce']['domain']
-    if domain:
-        domain += '.my'
+
+async def run_query(
+        source_object: str,
+        progress_task_id: int,
+        progress,
+        error_log: List[str],
+        extra_params: List[str],
+) -> Tuple[str, str, str]:
+    """
+    Runs the download script as a subprocess for a given Salesforce object.
+    Updates progress and error log as appropriate.
+    Returns a tuple: (object, status, message)
+    """
+    query = f"SELECT Id FROM {source_object}"
+    cmd = [
+              sys.executable,
+              download_script,
+              '-q', query,
+              '-so', source_object
+          ] + extra_params
+
+    logger.info(f"Prepared command: {' '.join(cmd)}")
+
+    progress.console.print(f":rocket: [cyan]Running:[/cyan] {' '.join(cmd)}")
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+
+    stdout, stderr = await process.communicate()
+
+    # Logging both stdout and stderr
+    if stdout:
+        logger.info(f"[{source_object}] STDOUT: {stdout.decode().strip()}")
+    if stderr:
+        logger.error(f"[{source_object}] STDERR: {stderr.decode().strip()}")
+
+    progress.update(progress_task_id, advance=1)
+
+    if process.returncode == 0:
+        msg = stdout.decode().strip()
+        progress.console.print(f":white_check_mark: [green]{source_object} succeeded.[/green]")
+        return (source_object, "Success", msg)
     else:
-        domain = 'login'
+        msg = stderr.decode().strip()
+        error_message = f"{source_object}: {msg}"
+        error_log.append(error_message)
+        progress.console.print(f":x: [red]{source_object} failed[/red]: {msg}")
+        return (source_object, "Failed", msg)
 
-    output_directory = config['salesforce']['output_dir']
-    batch_size = int(config['salesforce']['batch_size'])
-    loglevel = logging.getLevelName(config['salesforce']['loglevel'])
 
-    # Setup logging
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=loglevel)
+def prepare_output_directory(config: configparser.ConfigParser) -> None:
+    """
+    Prepares (and if configured, clears) the output directory for file exports.
+    Prompts the user before deletion unless auto-delete is enabled.
+    """
+    output_directory: str = config['salesforce']['output_dir']
+    output_dir_auto_delete: str = config['salesforce'].get('output_dir_auto_delete', 'false').lower()
 
-    logging.info('Export ContentVersion (Files) from Salesforce')
-    logging.info('Username: ' + username)
-    logging.info('Signing in at: https://'+ domain + '.salesforce.com')
+    # Check if output directory exists and is a directory
+    if os.path.exists(output_directory) and os.path.isdir(output_directory):
+        items_to_delete: List[str] = [os.path.join(output_directory, item) for item in os.listdir(output_directory)]
 
-    # Connect to Salesforce
-    sf = Salesforce(username=username, password=password, security_token=token, domain=domain)
-    logging.debug("Connected successfully to {0}".format(sf.sf_instance))
+        if items_to_delete:
+            print("The following files and directories will be deleted:\n")
+            for path in items_to_delete:
+                print(f"  - {path}")
 
-    # initialize the csv file header row
-    logging.info('Output directory: ' + output_directory)
+            should_delete = False
+            if output_dir_auto_delete == 'true':
+                should_delete = True
+            else:
+                confirm = input("\nAre you sure you want to delete these items? (yes/no): ").strip().lower()
+                if confirm in ('y', 'yes'):
+                    should_delete = True
+                else:
+                    print("\nDeletion cancelled.")
+
+            if should_delete:
+                for path in items_to_delete:
+                    if os.path.isfile(path) or os.path.islink(path):
+                        os.remove(path)
+                    elif os.path.isdir(path):
+                        shutil.rmtree(path)
+                print(f"\nCleared contents of: {output_directory}")
+        else:
+            print(f"No files or directories to delete in: {output_directory}")
+    else:
+        print(f"Directory does not exist: {output_directory}")
+
+    # Create output directory if it does not exist
     if not os.path.isdir(output_directory):
         os.mkdir(output_directory)
-    results_path = output_directory + 'files.csv'
-    with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
-        filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
-        filewriter.writerow(['FirstPublicationId', 'FirstPublicationName', 'ContentDocumentId', 'Title',
-                             'VersionData', 'PathOnClient'])
+        print(f"Created output directory: {output_directory}")
 
-    # retrieve all the ContentDocumentLinks for content documents we're going to download
-    logging.info("Querying to get Content Document Ids...")
-    if args.object == 'ContentDocumentLink':
-        content_document_query = 'SELECT ContentDocumentId, LinkedEntityId, LinkedEntity.Name, ContentDocument.Title, ' \
-                                 'ContentDocument.FileExtension FROM ContentDocumentLink ' \
-                                 'WHERE LinkedEntityId in ({0})'.format(args.query)
-        content_document_id_name = 'ContentDocumentId'
-    elif args.object == 'ContentDocument':
-        content_document_query = 'SELECT Id, Title, FileExtension FROM ContentDocument {0}'.format(args.query).strip()
-        content_document_id_name = 'Id'
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Download Salesforce files/attachments. Supports batch mode (CSV) or CLI mode (direct query).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Batch mode (default) - uses object_mapping.csv
+  python download.py
+
+  # CLI mode - download files from specific Account records
+  python download.py --mode cli -q "SELECT Id FROM Account WHERE Industry='Tech'" -so Account
+
+  # CLI mode with file extension filter (Excel files only)
+  python download.py --mode cli -q "SELECT Id FROM Case" -so Case -fe "'EXCEL_M', 'EXCEL'"
+
+  # CLI mode with custom filename pattern (linked entity name in path)
+  python download.py --mode cli -q "SELECT Id FROM Account" -so Account -f "{0}{4}/{1}-{2}.{3}"
+
+  # Download + immediate deploy
+  python download.py --mode cli -q "SELECT Id FROM Case LIMIT 10" -so Case --deploy
+        """
+    )
+    parser.add_argument("--mode", choices=['batch', 'cli'], default='batch',
+                        help="Operation mode: 'batch' uses object_mapping.csv, 'cli' uses direct SOQL query (default: batch)")
+    parser.add_argument("-q", "--query", metavar='QUERY',
+                        help="SOQL query to limit records (required for CLI mode)")
+    parser.add_argument("-so", "--source-object", metavar='OBJECT',
+                        help="Source object name (required for CLI mode)")
+    parser.add_argument("-o", "--object", metavar='TYPE', default='ContentDocumentLink',
+                        help="How ContentDocuments are selected: 'ContentDocumentLink' (default) or 'ContentDocument'")
+    parser.add_argument("-f", "--filenamepattern", metavar='PATTERN', default='{0}{1}-{2}.{3}',
+                        help="Filename pattern: {0}=output_dir, {1}=content_doc_id, {2}=title, {3}=extension, {4}=linked_entity_name, {5}=version_number")
+    parser.add_argument("-fe", "--filter_file_extension", metavar='FILTER', default=None,
+                        help="Filter by file type, e.g. \"'EXCEL_M', 'EXCEL'\" (Salesforce FileType values)")
+    parser.add_argument("--deploy", action='store_true',
+                        help="Run deploy automatically after download completes")
+    parser.add_argument("--extra", nargs=argparse.REMAINDER,
+                        help="Extra parameters to pass through to download_functions.py (batch mode only, after '--extra')",
+                        default=[])
+    return parser.parse_args()
+
+
+def run_cli_mode(args, config: configparser.ConfigParser) -> bool:
+    """
+    Run CLI mode - execute a single SOQL query download with Rich UI.
+    Returns True on success, False on failure.
+    """
+    console = Console()
+
+    # Build header panel showing query configuration
+    config_items = [
+        f"[cyan]Source Object:[/cyan] {args.source_object}",
+        f"[cyan]Query:[/cyan] {args.query}",
+        f"[cyan]Object Type:[/cyan] {args.object}",
+        f"[cyan]Filename Pattern:[/cyan] {args.filenamepattern}",
+    ]
+    if args.filter_file_extension:
+        config_items.append(f"[cyan]File Extension Filter:[/cyan] {args.filter_file_extension}")
+
+    header_panel = Panel(
+        "\n".join(config_items),
+        title="[bold blue]CLI Mode Configuration[/bold blue]",
+        expand=False
+    )
+    console.print(header_panel)
+    console.print()
+
+    # Build command
+    cmd = [
+        sys.executable,
+        download_script,
+        '-q', args.query,
+        '-so', args.source_object,
+        '-o', args.object,
+        '-f', args.filenamepattern,
+    ]
+    if args.filter_file_extension:
+        cmd.extend(['-fe', args.filter_file_extension])
+    logger.info(f"CLI mode command: {' '.join(cmd)}")
+    console.print(f":rocket: [cyan]Running:[/cyan] {' '.join(cmd)}")
+    console.print()
+
+    # Execute with direct terminal access (needed for Rich progress bar)
+    process = subprocess.Popen(cmd)
+    process.wait()
+
+    if process.returncode == 0:
+        console.print()
+        console.print(Panel(
+            f"[green]Download completed successfully for {args.source_object}[/green]",
+            title="[bold green]Success[/bold green]",
+            expand=False
+        ))
+        logger.info(f"CLI mode completed successfully for {args.source_object}")
+        return True
     else:
-        raise 'Invalid QueryType %s' % args.queryType
+        console.print()
+        console.print(Panel(
+            f"[red]Download failed for {args.source_object}[/red]",
+            title="[bold red]Failed[/bold red]",
+            expand=False
+        ))
+        logger.error(f"CLI mode failed for {args.source_object}")
+        return False
 
-    content_document_links = sf.query_all(content_document_query)["records"]
-    logging.info("Found {0} total files".format(len(content_document_links)))
 
-    # Begin Downloads
-    global_lock = threading.Lock()
-    fetch_files(sf=sf, content_document_links=content_document_links, output_directory=output_directory,
-                results_path=results_path, batch_size=batch_size, content_document_id_name=content_document_id_name,
-                filename_pattern=args.filenamepattern)
+async def run_batch_mode(args, config: configparser.ConfigParser) -> None:
+    """
+    Run batch mode - process objects from object_mapping.csv with Rich UI.
+    """
+    console = Console()
+    extra_params = args.extra
+
+    logger.info("Starting batch mode with extra_params=%s", extra_params)
+
+    tasks: List[Any] = []
+    object_names: List[str] = []
+    error_log: List[str] = []
+
+    # Read object mapping from CSV and create download tasks
+    with open(csv_file, mode='r', newline='') as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            source_object = row.get('Source Org Object', '').strip()
+            if source_object:
+                object_names.append(source_object)
+            else:
+                console.print("[yellow]Skipping row with empty 'Source Org Object'[/yellow]")
+
+    total_objects = len(object_names)
+
+    if total_objects == 0:
+        console.print("[red]No objects found to process. Exiting.[/red]")
+        sys.exit(1)
+
+    # Set up the progress bar UI and error panel
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True  # Remove bar after done
+    )
+
+    # Start progress bar and process all downloads
+    with progress:
+        task_id = progress.add_task("[blue]Downloading objects...", total=total_objects)
+        coros = [
+            run_query(obj, task_id, progress, error_log, extra_params)
+            for obj in object_names
+        ]
+        results = await asyncio.gather(*coros)
+
+    # Print summary table using rich
+    table = Table(title="Migration Summary", show_lines=True)
+    table.add_column("Object", style="cyan", no_wrap=True)
+    table.add_column("Status", style="green", justify="center")
+    table.add_column("Message", style="magenta")
+
+    for obj, status, message in results:
+        msg_short = message.replace('\n', ' ')
+        if len(msg_short) > 60:
+            msg_short = msg_short[:57] + "..."
+        if status == "Success":
+            status_style = "[green]Success[/green]"
+        else:
+            status_style = "[red]Failed[/red]"
+        table.add_row(obj, status_style, msg_short)
+
+    total = len(results)
+    succeeded = sum(1 for r in results if r[1] == "Success")
+    failed = sum(1 for r in results if r[1] == "Failed")
+
+    stats_panel = Panel(
+        f"[bold]Total:[/bold] {total}    [green]Succeeded:[/green] {succeeded}    [red]Failed:[/red] {failed}",
+        title="[yellow]Migration Results[/yellow]", expand=False
+    )
+
+    # Show error log panel if there are errors
+    error_panel = None
+    if error_log:
+        error_text = "\n".join([f"[red]{err}[/red]" for err in error_log])
+        error_panel = Panel(error_text, title="[bold red]Errors Encountered[/bold red]", expand=False)
+
+    group_items = [table, stats_panel]
+    if error_panel:
+        group_items.append(error_panel)
+
+    group = Group(*group_items)
+    console.print("\n")
+    console.print(group)
+
+    logger.info("Batch mode completed: Success=%s, Failed=%s", succeeded, failed)
+
+
+def run_deploy(source_object: str = None) -> bool:
+    """
+    Run the deploy script after download.
+    If source_object is provided, only deploy that object.
+    Returns True on success, False on failure.
+    """
+    console = Console()
+    deploy_script = 'deploy.py'
+
+    if not os.path.isfile(deploy_script):
+        console.print(f"[red]Deploy script not found: {deploy_script}[/red]")
+        return False
+
+    console.print()
+    console.print(Panel(
+        "[cyan]Starting deployment...[/cyan]",
+        title="[bold blue]Deploy Phase[/bold blue]",
+        expand=False
+    ))
+
+    cmd = [sys.executable, deploy_script]
+    logger.info(f"Running deploy: {' '.join(cmd)}")
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
+    )
+
+    for line in process.stdout:
+        console.print(line.rstrip())
+
+    process.wait()
+
+    if process.returncode == 0:
+        logger.info("Deploy completed successfully")
+        return True
+    else:
+        logger.error("Deploy failed")
+        return False
+
+
+async def main() -> None:
+    """
+    Main entry point - determines mode and executes appropriate workflow.
+    """
+    args = parse_args()
+    console = Console()
+
+    logger.info("Starting download script in %s mode", args.mode)
+
+    # Validate CLI mode requirements
+    if args.mode == 'cli':
+        if not args.query:
+            console.print("[red]Error: --query (-q) is required for CLI mode[/red]")
+            sys.exit(1)
+        if not args.source_object:
+            console.print("[red]Error: --source-object (-so) is required for CLI mode[/red]")
+            sys.exit(1)
+
+    preflight_checks(mode=args.mode)
+    config = load_config()
+
+    if args.mode == 'batch':
+        prepare_output_directory(config)
+        await run_batch_mode(args, config)
+    else:  # CLI mode
+        success = run_cli_mode(args, config)
+        if args.deploy and success:
+            run_deploy(args.source_object)
+
+    logger.info("Script completed")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,0 +1,28 @@
+[salesforce]
+source_username = xxxx
+source_password = xxxx
+source_security_token = xxxx
+source_domain = <mydomain>--<sandboxname>.sandbox
+source_connect_to_sandbox = False
+
+target_username = xxxx
+target_password = xxxx
+target_security_token = xxxx
+target_domain = <mydomain>--<sandboxname>.sandbox
+target_connect_to_sandbox = False
+
+output_dir = exported_files/
+output_dir_auto_delete = true
+deployment_dir = deployment_files/
+
+batch_size = 100
+loglevel = INFO
+
+# Filename pattern placeholders:
+# {0}=output_directory, {1}=content_document_id, {2}=title, {3}=file_extension,
+# {4}=linked_entity_name, {5}=version_number
+default_filename_pattern = {0}{1}-{2}.{3}
+
+# Filter by Salesforce FileType (e.g. "'EXCEL_M', 'EXCEL'", "'PDF'")
+# Leave empty for no filter (will exclude .snote by default)
+default_file_extension_filter =

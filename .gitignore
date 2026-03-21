@@ -1,1 +1,23 @@
-/download.ini
+# Credentials
+config.ini
+download.ini
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+
+# Claude
+.claude/
+
+# Output
+exported_files/
+deployment_files/
+deploy_summary.json
+output/
