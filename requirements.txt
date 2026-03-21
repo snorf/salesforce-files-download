@@ -28,6 +28,6 @@ rich==14.0.0
 simple-salesforce==1.12.6
 tqdm==4.67.1
 typing_extensions==4.13.2
-urllib3==2.4.0
+urllib3==2.6.3
 yarl==1.20.0
 zeep==4.3.1
