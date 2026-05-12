@@ -175,6 +175,6 @@ salesforce-files-download/
 
 ## Prerequisites
 
-- Python 3.7+
+- Python 3.10+
 - Salesforce user with permissions to read/write ContentDocument, ContentVersion, ContentDocumentLink
 - For deploy: parent records must exist in target org with `SI_Old_Id__c` populated
