@@ -9,6 +9,8 @@ from download_functions import (
     DEFAULT_DOWNLOAD_URL_PATTERN,
     build_download_url,
     download_file,
+    fetch_files,
+    format_size,
     query_content_document_links,
     reserve_unique_filename,
     split_into_batches,
@@ -176,7 +178,7 @@ def _record(**overrides):
     record = {
         "Id": "068A", "ContentDocumentId": "069A", "Title": "Report", "FileExtension": "pdf",
         "FileType": "PDF", "OwnerId": "005A", "VersionNumber": "1",
-        "Checksum": CHECKSUM, "VersionData": "/services/data/v60.0/sobjects/ContentVersion/068A/VersionData",
+        "Checksum": CHECKSUM, "ContentSize": 29491, "VersionData": "/services/data/v60.0/sobjects/ContentVersion/068A/VersionData",
     }
     record.update(overrides)
     return record
@@ -244,7 +246,28 @@ def no_http(monkeypatch):
     monkeypatch.setattr(requests, "get", fail_get)
 
 
+DOWNLOAD_URL, CHECKSUM_COLUMN, CONTENT_SIZE = 11, 12, 13
+
+
 class TestDownloadFileMetadataOnly:
+    def test_checksum_and_content_size_are_the_last_columns(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, metadata_only=True)
+
+        assert len(rows[0]) == 14
+        assert rows[0][CHECKSUM_COLUMN] == CHECKSUM
+        assert rows[0][CONTENT_SIZE] == "29491"
+
+    def test_missing_checksum_and_size_are_written_as_empty(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, True, record=_record(Checksum=None, ContentSize=None))
+
+        assert rows[0][CHECKSUM_COLUMN] == ""
+        assert rows[0][CONTENT_SIZE] == ""
+
+    def test_empty_file_size_is_written_as_zero(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, True, record=_record(ContentSize=0))
+
+        assert rows[0][CONTENT_SIZE] == "0"
+
     def test_metadata_only_writes_csv_row_without_http_request(self, tmp_path, no_http):
         result, rows = _run_download_file(tmp_path, metadata_only=True)
 
@@ -252,22 +275,21 @@ class TestDownloadFileMetadataOnly:
         assert rows[0][0] == "068A"
         assert not (tmp_path / "069A-Report.pdf").exists()
 
-    def test_download_url_is_last_column_and_defaults_to_salesforce_rest_url(self, tmp_path, no_http):
+    def test_download_url_defaults_to_salesforce_rest_url(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, metadata_only=True)
 
-        assert len(rows[0]) == 12
-        assert rows[0][-1] == f"https://{INSTANCE}/services/data/v60.0/sobjects/ContentVersion/068A/VersionData"
+        assert rows[0][DOWNLOAD_URL] == f"https://{INSTANCE}/services/data/v60.0/sobjects/ContentVersion/068A/VersionData"
 
     def test_download_url_follows_configured_pattern(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, metadata_only=True, download_url_pattern=S3_PATTERN)
 
-        assert rows[0][-1] == f"s3://bucket/OrgId=00Dxx/Period=0/files/0000/{CHECKSUM}.pdf"
+        assert rows[0][DOWNLOAD_URL] == f"s3://bucket/OrgId=00Dxx/Period=0/files/0000/{CHECKSUM}.pdf"
 
     def test_missing_checksum_gives_empty_download_url_but_row_is_written(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, True, S3_PATTERN, record=_record(Checksum=""))
 
         assert rows[0][0] == "068A"
-        assert rows[0][-1] == ""
+        assert rows[0][DOWNLOAD_URL] == ""
 
     def test_title_with_comma_and_quote_round_trips_through_dict_reader(self, tmp_path, no_http):
         # deploy.py reads files.csv with csv.DictReader defaults, so the writer must use standard quoting
@@ -278,4 +300,49 @@ class TestDownloadFileMetadataOnly:
         fields = ["ContentVersionOldId", "FirstPublicationId", "FirstPublicationName", "ContentDocumentId", "Title"]
         row = next(csv.DictReader((tmp_path / "files.csv").open(encoding="UTF-8"), fieldnames=fields, restkey="rest"))
         assert row["Title"] == title
-        assert len(row["rest"]) == 7
+        assert len(row["rest"]) == 9
+
+
+class FakeContentVersionSalesforce(FakeSessionSalesforce):
+    def __init__(self, records):
+        self.records = records
+
+    def query(self, query):
+        return {"records": self.records}
+
+
+class TestFetchFilesTotalSize:
+    def test_total_bytes_sums_content_size_of_all_exported_files(self, tmp_path, no_http):
+        records = [
+            _record(Id="068A", ContentDocumentId="069A", ContentSize=1000),
+            _record(Id="068B", ContentDocumentId="069B", ContentSize=2048),
+            _record(Id="068C", ContentDocumentId="069C", ContentSize=None),
+        ]
+        links = [{"ContentDocumentId": r["ContentDocumentId"]} for r in records]
+
+        stats = fetch_files(
+            sf=FakeContentVersionSalesforce(records), content_document_links=links,
+            folder_output_directory=str(tmp_path) + "/", results_path=str(tmp_path / "files.csv"),
+            filename_pattern="{0}{1}-{2}.{3}", metadata_only=True,
+        )
+
+        assert stats["total"] == 3
+        assert stats["success"] == 3
+        assert stats["total_bytes"] == 3048
+
+    def test_no_files_gives_zero_total_bytes(self, tmp_path):
+        stats = fetch_files(sf=FakeContentVersionSalesforce([]), content_document_links=[])
+        assert stats["total_bytes"] == 0
+
+
+class TestFormatSize:
+    @pytest.mark.parametrize("num_bytes, expected", [
+        (0, "0 bytes"),
+        (1023, "1023 bytes"),
+        (1536, "1.5 KB"),
+        (5 * 1024 ** 2, "5.0 MB"),
+        (int(2.5 * 1024 ** 3), "2.5 GB"),
+        (3 * 1024 ** 4, "3.0 TB"),
+    ])
+    def test_sizes_use_1024_based_units(self, num_bytes, expected):
+        assert format_size(num_bytes) == expected

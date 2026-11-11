@@ -161,6 +161,10 @@ download_url_pattern = s3://<bucket>/OrgId=<orgid>/Period=0/files/{checksum_pref
 Rows where a value used by the pattern is missing (e.g. no checksum) get an empty `DownloadUrl`.
 Note that the `VersionData` column in `files.csv` holds the local file path, not a URL.
 
+After `DownloadUrl`, every row has `Checksum` (MD5 of the content, to verify a download) and
+`ContentSize` (bytes). The run summary prints the total size of all exported files, e.g.
+`Total size: 12.4 GB (13314398617 bytes in 48210 files)`.
+
 ## How It Works
 
 ### Download Phase

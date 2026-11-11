@@ -155,6 +155,16 @@ def build_download_url(pattern: str, instance: str, record: Dict[str, Any]) -> s
     return pattern.format(**values)
 
 
+def format_size(num_bytes: int) -> str:
+    """Format a byte count as a human readable size, e.g. 1536 -> '1.5 KB' (1024-based)."""
+    size = float(num_bytes)
+    for unit in ('bytes', 'KB', 'MB', 'GB'):
+        if size < 1024:
+            return f"{int(size)} bytes" if unit == 'bytes' else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
 
 def preflight_checks(config: configparser.ConfigParser, folder_output_directory: str) -> None:
     errors = []
@@ -287,7 +297,9 @@ def download_file(args: Tuple) -> str:
                         case_record_type_name,   # If Case
                         case_contact_id,          # If Case
                         owner_id,
-                        download_url
+                        download_url,
+                        record.get("Checksum") or "",
+                        "" if record.get("ContentSize") is None else record["ContentSize"]
                     ]
                     filewriter.writerow(row)
             except Exception as ex:
@@ -318,12 +330,13 @@ def fetch_files(
 
     # Count total files across all batches for progress bar
     total_files = 0
+    total_bytes = 0
     batch_records: List[List[Dict[str, Any]]] = []
     for i, batch in enumerate(batches, 1):
         logging.info("Processing batch {0}/{1}".format(i, len(batches)))
 
         query_string = (
-            "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, FileType, OwnerId, VersionNumber, Checksum "
+            "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, FileType, OwnerId, VersionNumber, Checksum, ContentSize "
             "FROM ContentVersion "
             f"WHERE IsLatest = True AND {build_file_type_condition(file_extension_filter)}"
         )
@@ -346,10 +359,11 @@ def fetch_files(
 
         batch_records.append(records)
         total_files += len(records)
+        total_bytes += sum(int(record.get("ContentSize") or 0) for record in records)
 
     if not total_files:
         logging.info("No files to download")
-        return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "duration": 0.0}
+        return {"total": 0, "success": 0, "failed": 0, "skipped": 0, "duration": 0.0, "total_bytes": 0}
 
     start_time = time.time()
     success_count = 0
@@ -394,7 +408,8 @@ def fetch_files(
 
     duration = time.time() - start_time
     logging.info('All batches complete')
-    return {"total": total_files, "success": success_count, "failed": failed_count, "skipped": skipped_count, "duration": duration}
+    return {"total": total_files, "success": success_count, "failed": failed_count, "skipped": skipped_count,
+            "duration": duration, "total_bytes": total_bytes}
 
 
 def main():
@@ -456,7 +471,9 @@ def main():
         'CaseRecordTypeName',    # Case RecordType.Name or blank
         'CaseContactId',          # Case ContactId or blank
         'OwnerId',
-        'DownloadUrl'
+        'DownloadUrl',
+        'Checksum',              # MD5 of the file content
+        'ContentSize'            # bytes
     ]
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv)
@@ -499,6 +516,7 @@ def main():
         files_per_sec = downloaded / duration if duration > 0 and downloaded > 0 else 0
         print(f"\nDownload complete: {stats['success']} succeeded, {stats['failed']} failed, {stats['skipped']} skipped out of {stats['total']} files")
         print(f"Duration: {int(minutes)}m {seconds:.1f}s" + (f" ({files_per_sec:.1f} files/sec)" if files_per_sec > 0 else ""))
+        print(f"Total size: {format_size(stats['total_bytes'])} ({stats['total_bytes']} bytes in {stats['total']} files)")
         print(f"Output: {folder_output_directory}")
     else:
         print("No files to download")
