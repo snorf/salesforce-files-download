@@ -230,7 +230,7 @@ def download_file(args: Tuple) -> str:
         with csv_writer_lock:
             try:
                 with open(results_path, 'a', encoding='UTF-8', newline='') as results_csv:
-                    filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+                    filewriter = csv.writer(results_csv)
                     filewriter.writerow([
                         content_version_old_id, linked_entity_id, linked_entity_name, content_document_id, title,
                         filename, filename,
@@ -397,7 +397,7 @@ def main():
         'OwnerId'
     ]
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
-        filewriter = csv.writer(results_csv, delimiter=',', quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        filewriter = csv.writer(results_csv)
         filewriter.writerow(csv_header)
 
     # Use generic SOQL for all objects, so no SOQL errors for non-Case objects

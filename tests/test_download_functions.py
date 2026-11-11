@@ -1,9 +1,12 @@
 import concurrent.futures
+import csv
 
 import pytest
+import requests
 
 from download_functions import (
     build_file_type_condition,
+    download_file,
     query_content_document_links,
     reserve_unique_filename,
     split_into_batches,
@@ -159,3 +162,32 @@ class TestBuildFileTypeCondition:
         assert build_file_type_condition("'PDF', 'EXCEL', '^JSON'") == (
             "FileType IN ('PDF', 'EXCEL') AND FileType NOT IN ('JSON')"
         )
+
+
+class FakeSessionSalesforce:
+    sf_instance = "example.my.salesforce.com"
+    session_id = "SESSION"
+
+
+class FakeResponse:
+    ok = True
+    content = b"data"
+
+
+class TestResultsCsvQuoting:
+    def test_title_with_comma_and_quote_round_trips_through_dict_reader(self, tmp_path, monkeypatch):
+        # deploy.py reads files.csv with csv.DictReader defaults, so the writer must use standard quoting
+        monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse())
+        title = 'Offer, "final" | v2'
+        record = {"Id": "068A", "ContentDocumentId": "069A", "Title": title, "FileExtension": "pdf",
+                  "OwnerId": "005A", "VersionNumber": "1", "Checksum": "", "VersionData": "/x"}
+        links = [{"ContentDocumentId": "069A", "LinkedEntityId": "001A", "LinkedEntity": {"Name": "Acme"}}]
+        results_path = tmp_path / "files.csv"
+
+        download_file((record, str(tmp_path) + "/", FakeSessionSalesforce(), str(results_path),
+                       links, "ContentDocumentId", "{0}{1}-{2}.{3}"))
+
+        fields = ["ContentVersionOldId", "FirstPublicationId", "FirstPublicationName", "ContentDocumentId", "Title"]
+        row = next(csv.DictReader(results_path.open(encoding="UTF-8"), fieldnames=fields, restkey="rest"))
+        assert row["Title"] == title
+        assert len(row["rest"]) == 6
