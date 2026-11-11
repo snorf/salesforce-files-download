@@ -131,18 +131,35 @@ python deploy.py
 
 Default: `{0}{1}-{2}.{3}` (e.g. `output/069xx-MyFile.pdf`)
 
-### Metadata only with S3 references
+### Metadata only and download URLs
 
-When the files are already backed up to S3 by Heimdall, run with `--metadata-only`
-(batch mode: `python download.py --extra --metadata-only`) and set `s3_base_uri` in `config.ini`:
+`--metadata-only` writes `files.csv` without downloading the files (batch mode:
+`python download.py --extra --metadata-only`), so another system can fetch them itself.
 
-```ini
-s3_base_uri = s3://<bucket>/OrgId=<orgid>/Period=0/files/
+Every row has a `DownloadUrl` column built from `download_url_pattern` in `config.ini`. The default is the
+Salesforce REST URL, which returns the file content with `Authorization: Bearer <access token>`:
+
+```
+https://{instance}{version_data}  ->  https://mydomain.my.salesforce.com/services/data/vXX.X/sobjects/ContentVersion/068.../VersionData
 ```
 
-`files.csv` then gets an extra `S3Uri` column, `{s3_base_uri}{checksum[:4]}/{checksum}.{extension}`,
-matching Heimdall's content-addressable layout. The extension is `FileExtension` as-is (falling back to
-`FileType`), exactly as Heimdall writes it. Rows without a checksum get an empty `S3Uri`.
+For files already backed up to S3 by Heimdall, point the pattern at its content-addressable layout:
+
+```ini
+download_url_pattern = s3://<bucket>/OrgId=<orgid>/Period=0/files/{checksum_prefix}/{checksum}.{extension}
+```
+
+| Placeholder            | Value                                                |
+| ---------------------- | ---------------------------------------------------- |
+| `{instance}`           | Salesforce instance host                             |
+| `{version_data}`       | ContentVersion.VersionData (REST path)               |
+| `{content_version_id}` | ContentVersion ID                                    |
+| `{checksum}`           | ContentVersion.Checksum (MD5)                        |
+| `{checksum_prefix}`    | First 4 characters of the checksum                   |
+| `{extension}`          | FileExtension as-is, falling back to FileType         |
+
+Rows where a value used by the pattern is missing (e.g. no checksum) get an empty `DownloadUrl`.
+Note that the `VersionData` column in `files.csv` holds the local file path, not a URL.
 
 ## How It Works
 

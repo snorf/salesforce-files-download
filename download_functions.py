@@ -3,6 +3,7 @@ import hashlib
 import os
 import csv
 import re
+import string
 import logging
 import threading
 import argparse
@@ -110,20 +111,48 @@ def build_file_type_condition(file_extension_filter: Optional[str]) -> str:
     return " AND ".join(conditions)
 
 
-def build_s3_uri(s3_base_uri: str, checksum: str, file_extension: str, file_type: str = '') -> str:
-    """
-    Build the S3 URI of a file stored by Heimdall's content-addressable layout:
-    {s3_base_uri}{checksum[:4]}/{checksum}.{extension}
+DEFAULT_DOWNLOAD_URL_PATTERN = 'https://{instance}{version_data}'
+DOWNLOAD_URL_PLACEHOLDERS = (
+    'instance', 'version_data', 'content_version_id', 'checksum', 'checksum_prefix', 'extension'
+)
 
-    Mirrors Heimdall's S3Service.buildContentVersionS3KeyByChecksum: the extension is used
-    as-is (FileExtension, falling back to FileType). Returns '' when the key can't be built.
+
+def download_url_placeholders(pattern: str) -> List[str]:
+    """Return the placeholder names used in a download URL pattern."""
+    return [field for _, field, _, _ in string.Formatter().parse(pattern) if field is not None]
+
+
+def validate_download_url_pattern(pattern: str) -> None:
+    """Raise ValueError if the pattern uses a placeholder that build_download_url doesn't provide."""
+    unknown = [field for field in download_url_placeholders(pattern) if field not in DOWNLOAD_URL_PLACEHOLDERS]
+    if unknown:
+        raise ValueError(
+            f"Unknown placeholder(s) in download_url_pattern: {', '.join(unknown)}. "
+            f"Allowed: {', '.join(DOWNLOAD_URL_PLACEHOLDERS)}"
+        )
+
+
+def build_download_url(pattern: str, instance: str, record: Dict[str, Any]) -> str:
     """
-    extension = file_extension or file_type
-    if not s3_base_uri or not checksum or not extension:
+    Build the DownloadUrl for a ContentVersion record from a pattern such as
+    'https://{instance}{version_data}' (Salesforce REST) or
+    's3://bucket/OrgId=X/Period=0/files/{checksum_prefix}/{checksum}.{extension}' (Heimdall backup).
+
+    {extension} is FileExtension, falling back to FileType, as Heimdall names its S3 keys.
+    Returns '' when a value used by the pattern is missing.
+    """
+    checksum = record.get('Checksum') or ''
+    values = {
+        'instance': instance or '',
+        'version_data': record.get('VersionData') or '',
+        'content_version_id': record.get('Id') or '',
+        'checksum': checksum,
+        'checksum_prefix': checksum[:4],
+        'extension': record.get('FileExtension') or record.get('FileType') or '',
+    }
+    if any(not values[field] for field in download_url_placeholders(pattern)):
         return ''
-    if not s3_base_uri.endswith('/'):
-        s3_base_uri += '/'
-    return f"{s3_base_uri}{checksum[:4]}/{checksum}.{extension}"
+    return pattern.format(**values)
 
 
 
@@ -165,7 +194,7 @@ def download_file(args: Tuple) -> str:
     (
         record, folder_output_directory, sf, results_path,
         content_document_links, content_document_id_name, filename_pattern,
-        metadata_only, s3_base_uri
+        metadata_only, download_url_pattern
     ) = args
 
     content_version_old_id = record.get("Id", "UNKNOWN")
@@ -206,9 +235,9 @@ def download_file(args: Tuple) -> str:
         )
         filename = reserve_unique_filename(filename)
 
-        s3_uri = build_s3_uri(s3_base_uri, record.get("Checksum", ""), file_extension, record.get("FileType", ""))
-        if s3_base_uri and not s3_uri:
-            logger.warning(f"No S3 URI for ContentVersion {content_version_old_id} - missing checksum or extension")
+        download_url = build_download_url(download_url_pattern, getattr(sf, 'sf_instance', ''), record)
+        if not download_url:
+            logger.warning(f"No DownloadUrl for ContentVersion {content_version_old_id} - a value used by the pattern is missing")
 
         # Skip if file exists and checksum matches (no point re-downloading identical files)
         skipped = False
@@ -257,10 +286,9 @@ def download_file(args: Tuple) -> str:
                         linked_entity_type,      # Case or ""
                         case_record_type_name,   # If Case
                         case_contact_id,          # If Case
-                        owner_id
+                        owner_id,
+                        download_url
                     ]
-                    if s3_base_uri:
-                        row.append(s3_uri)
                     filewriter.writerow(row)
             except Exception as ex:
                 logger.error(f"Error writing CSV for {filename}: {ex}")
@@ -283,7 +311,7 @@ def fetch_files(
     batch_size: int = 100,
     file_extension_filter: Optional[str] = None,
     metadata_only: bool = False,
-    s3_base_uri: str = ''
+    download_url_pattern: str = DEFAULT_DOWNLOAD_URL_PATTERN
 ) -> None:
     batches = list(split_into_batches(content_document_links or [], batch_size))
     used_filenames.clear()
@@ -349,7 +377,7 @@ def fetch_files(
             args_list = [
                 (
                     record, folder_output_directory, sf, results_path, batch, content_document_id_name, filename_pattern,
-                    metadata_only, s3_base_uri
+                    metadata_only, download_url_pattern
                 ) for record in records
             ]
 
@@ -413,6 +441,9 @@ def main():
 
     preflight_checks(config, folder_output_directory)
 
+    download_url_pattern = config['salesforce'].get('download_url_pattern') or DEFAULT_DOWNLOAD_URL_PATTERN
+    validate_download_url_pattern(download_url_pattern)
+
     sf = Salesforce(username=username, password=password, security_token=token, domain=domain)
     logging.debug("Connected successfully to {0}".format(sf.sf_instance))
 
@@ -424,11 +455,9 @@ def main():
         'LinkedEntityType',      # Case or blank
         'CaseRecordTypeName',    # Case RecordType.Name or blank
         'CaseContactId',          # Case ContactId or blank
-        'OwnerId'
+        'OwnerId',
+        'DownloadUrl'
     ]
-    s3_base_uri = config['salesforce'].get('s3_base_uri', '') or ''
-    if s3_base_uri:
-        csv_header.append('S3Uri')
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv)
         filewriter.writerow(csv_header)
@@ -460,7 +489,7 @@ def main():
         filename_pattern=args.filenamepattern or config['salesforce'].get('default_filename_pattern') or '{0}{1}-{2}.{3}',
         file_extension_filter=file_extension_filter if file_extension_filter else None,
         metadata_only=args.metadata_only,
-        s3_base_uri=s3_base_uri
+        download_url_pattern=download_url_pattern
     )
 
     if stats and stats["total"] > 0:

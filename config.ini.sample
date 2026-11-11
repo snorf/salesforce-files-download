@@ -28,7 +28,9 @@ default_filename_pattern = {0}{1}-{2}.{3}
 # Leave empty for no filter (will exclude .snote by default)
 default_file_extension_filter =
 
-# Optional: adds an S3Uri column to files.csv pointing at the file in a Heimdall backup bucket
-# ({s3_base_uri}{checksum[:4]}/{checksum}.{extension}). Leave empty to omit the column.
-# s3_base_uri = s3://<bucket>/OrgId=<orgid>/Period=0/files/
-s3_base_uri =
+# Pattern for the DownloadUrl column in files.csv. Placeholders:
+# {instance}, {version_data}, {content_version_id}, {checksum}, {checksum_prefix} (first 4 chars),
+# {extension} (FileExtension, falling back to FileType)
+# Leave empty for the Salesforce REST URL: https://{instance}{version_data}
+# Heimdall S3 backup: s3://<bucket>/OrgId=<orgid>/Period=0/files/{checksum_prefix}/{checksum}.{extension}
+download_url_pattern =

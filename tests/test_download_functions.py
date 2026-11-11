@@ -6,12 +6,14 @@ import requests
 
 from download_functions import (
     build_file_type_condition,
-    build_s3_uri,
+    DEFAULT_DOWNLOAD_URL_PATTERN,
+    build_download_url,
     download_file,
     query_content_document_links,
     reserve_unique_filename,
     split_into_batches,
     used_filenames,
+    validate_download_url_pattern,
 )
 
 
@@ -165,105 +167,115 @@ class TestBuildFileTypeCondition:
         )
 
 
-class TestBuildS3Uri:
-    BASE = "s3://bucket/OrgId=00Dxx/Period=0/files/"
-    CHECKSUM = "0000aaaabbbbccccddddeeeeffff0000"
-
-    def test_uri_uses_first_four_checksum_chars_as_prefix(self):
-        assert build_s3_uri(self.BASE, self.CHECKSUM, "pdf") == (
-            "s3://bucket/OrgId=00Dxx/Period=0/files/0000/0000aaaabbbbccccddddeeeeffff0000.pdf"
-        )
-
-    def test_extension_case_is_kept_as_heimdall_writes_it(self):
-        assert build_s3_uri(self.BASE, self.CHECKSUM, "PDF").endswith(".PDF")
-
-    def test_file_type_used_when_extension_missing(self):
-        assert build_s3_uri(self.BASE, self.CHECKSUM, "", "PDF").endswith(f"{self.CHECKSUM}.PDF")
-
-    def test_null_extension_falls_back_to_unknown_file_type(self):
-        # Salesforce returns FileExtension as null for files without extension; Heimdall stores them as .UNKNOWN
-        assert build_s3_uri(self.BASE, self.CHECKSUM, None, "UNKNOWN").endswith(f"{self.CHECKSUM}.UNKNOWN")
-
-    def test_base_without_trailing_slash_is_normalised(self):
-        assert build_s3_uri(self.BASE.rstrip("/"), self.CHECKSUM, "pdf") == build_s3_uri(self.BASE, self.CHECKSUM, "pdf")
-
-    @pytest.mark.parametrize("base, checksum, ext", [
-        ("", CHECKSUM, "pdf"),
-        (BASE, "", "pdf"),
-        (BASE, CHECKSUM, ""),
-    ])
-    def test_empty_when_key_cannot_be_built(self, base, checksum, ext):
-        assert build_s3_uri(base, checksum, ext) == ""
-
-
-class FakeSessionSalesforce:
-    sf_instance = "example.my.salesforce.com"
-    session_id = "SESSION"
+CHECKSUM = "0000aaaabbbbccccddddeeeeffff0000"
+S3_PATTERN = "s3://bucket/OrgId=00Dxx/Period=0/files/{checksum_prefix}/{checksum}.{extension}"
+INSTANCE = "example.my.salesforce.com"
 
 
 def _record(**overrides):
     record = {
         "Id": "068A", "ContentDocumentId": "069A", "Title": "Report", "FileExtension": "pdf",
         "FileType": "PDF", "OwnerId": "005A", "VersionNumber": "1",
-        "Checksum": "0000aaaabbbbccccddddeeeeffff0000", "VersionData": "/services/data/v60.0/x",
+        "Checksum": CHECKSUM, "VersionData": "/services/data/v60.0/sobjects/ContentVersion/068A/VersionData",
     }
     record.update(overrides)
     return record
 
 
-def _run_download_file(tmp_path, metadata_only, s3_base_uri, record=None):
+class TestBuildDownloadUrl:
+    def test_default_pattern_gives_salesforce_rest_url(self):
+        assert build_download_url(DEFAULT_DOWNLOAD_URL_PATTERN, INSTANCE, _record()) == (
+            "https://example.my.salesforce.com/services/data/v60.0/sobjects/ContentVersion/068A/VersionData"
+        )
+
+    def test_s3_pattern_gives_heimdall_key_with_four_char_checksum_prefix(self):
+        assert build_download_url(S3_PATTERN, INSTANCE, _record()) == (
+            "s3://bucket/OrgId=00Dxx/Period=0/files/0000/0000aaaabbbbccccddddeeeeffff0000.pdf"
+        )
+
+    def test_extension_case_is_kept_as_heimdall_writes_it(self):
+        assert build_download_url(S3_PATTERN, INSTANCE, _record(FileExtension="PDF")).endswith(".PDF")
+
+    @pytest.mark.parametrize("file_extension", ["", None])
+    def test_missing_extension_falls_back_to_file_type(self, file_extension):
+        # Heimdall stores files without extension as {checksum}.UNKNOWN (FileType)
+        url = build_download_url(S3_PATTERN, INSTANCE, _record(FileExtension=file_extension, FileType="UNKNOWN"))
+        assert url.endswith(f"{CHECKSUM}.UNKNOWN")
+
+    def test_missing_value_used_by_pattern_gives_empty_url(self):
+        assert build_download_url(S3_PATTERN, INSTANCE, _record(Checksum="")) == ""
+        assert build_download_url(S3_PATTERN, INSTANCE, _record(Checksum=None)) == ""
+
+    def test_missing_value_not_used_by_pattern_is_ignored(self):
+        assert build_download_url(DEFAULT_DOWNLOAD_URL_PATTERN, INSTANCE, _record(Checksum="")) != ""
+
+
+class TestValidateDownloadUrlPattern:
+    @pytest.mark.parametrize("pattern", [DEFAULT_DOWNLOAD_URL_PATTERN, S3_PATTERN, "https://x/{content_version_id}"])
+    def test_supported_patterns_are_accepted(self, pattern):
+        validate_download_url_pattern(pattern)
+
+    @pytest.mark.parametrize("pattern", ["https://{host}{version_data}", "s3://b/{0}", "s3://b/{}"])
+    def test_unknown_or_positional_placeholder_is_rejected_before_any_work(self, pattern):
+        with pytest.raises(ValueError, match="Unknown placeholder"):
+            validate_download_url_pattern(pattern)
+
+
+class FakeSessionSalesforce:
+    sf_instance = INSTANCE
+    session_id = "SESSION"
+
+
+def _run_download_file(tmp_path, metadata_only, download_url_pattern=DEFAULT_DOWNLOAD_URL_PATTERN, record=None):
     results_path = tmp_path / "files.csv"
     links = [{"ContentDocumentId": "069A", "LinkedEntityId": "001A", "LinkedEntity": {"Name": "Acme"}}]
     result = download_file((
         record or _record(), str(tmp_path) + "/", FakeSessionSalesforce(), str(results_path),
-        links, "ContentDocumentId", "{0}{1}-{2}.{3}", metadata_only, s3_base_uri,
+        links, "ContentDocumentId", "{0}{1}-{2}.{3}", metadata_only, download_url_pattern,
     ))
     rows = list(csv.reader(results_path.open(encoding="UTF-8")))
     return result, rows
 
 
-class TestDownloadFileMetadataOnly:
-    def test_metadata_only_writes_csv_row_without_http_request(self, tmp_path, monkeypatch):
-        def fail_get(*args, **kwargs):
-            raise AssertionError("metadata-only must not download")
-        monkeypatch.setattr(requests, "get", fail_get)
+@pytest.fixture
+def no_http(monkeypatch):
+    def fail_get(*args, **kwargs):
+        raise AssertionError("metadata-only must not download")
+    monkeypatch.setattr(requests, "get", fail_get)
 
-        result, rows = _run_download_file(tmp_path, metadata_only=True, s3_base_uri="")
+
+class TestDownloadFileMetadataOnly:
+    def test_metadata_only_writes_csv_row_without_http_request(self, tmp_path, no_http):
+        result, rows = _run_download_file(tmp_path, metadata_only=True)
 
         assert result.startswith("Recorded")
         assert rows[0][0] == "068A"
         assert not (tmp_path / "069A-Report.pdf").exists()
 
-    def test_s3_uri_column_appended_when_base_uri_set(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("no download expected"))
-
-        _, rows = _run_download_file(tmp_path, metadata_only=True, s3_base_uri="s3://b/files/")
+    def test_download_url_is_last_column_and_defaults_to_salesforce_rest_url(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, metadata_only=True)
 
         assert len(rows[0]) == 12
-        assert rows[0][-1] == "s3://b/files/0000/0000aaaabbbbccccddddeeeeffff0000.pdf"
+        assert rows[0][-1] == f"https://{INSTANCE}/services/data/v60.0/sobjects/ContentVersion/068A/VersionData"
 
-    def test_csv_row_unchanged_when_base_uri_unset(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("no download expected"))
+    def test_download_url_follows_configured_pattern(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, metadata_only=True, download_url_pattern=S3_PATTERN)
 
-        _, rows = _run_download_file(tmp_path, metadata_only=True, s3_base_uri="")
+        assert rows[0][-1] == f"s3://bucket/OrgId=00Dxx/Period=0/files/0000/{CHECKSUM}.pdf"
 
-        assert len(rows[0]) == 11
+    def test_missing_checksum_gives_empty_download_url_but_row_is_written(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, True, S3_PATTERN, record=_record(Checksum=""))
 
-    def test_missing_checksum_gives_empty_s3_uri(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("no download expected"))
-
-        _, rows = _run_download_file(tmp_path, True, "s3://b/files/", record=_record(Checksum=""))
-
+        assert rows[0][0] == "068A"
         assert rows[0][-1] == ""
 
-    def test_title_with_comma_and_quote_round_trips_through_dict_reader(self, tmp_path, monkeypatch):
+    def test_title_with_comma_and_quote_round_trips_through_dict_reader(self, tmp_path, no_http):
         # deploy.py reads files.csv with csv.DictReader defaults, so the writer must use standard quoting
-        monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("no download expected"))
         title = 'Offer, "final" | v2'
 
-        _run_download_file(tmp_path, True, "", record=_record(Title=title))
+        _run_download_file(tmp_path, True, record=_record(Title=title))
 
         fields = ["ContentVersionOldId", "FirstPublicationId", "FirstPublicationName", "ContentDocumentId", "Title"]
         row = next(csv.DictReader((tmp_path / "files.csv").open(encoding="UTF-8"), fieldnames=fields, restkey="rest"))
         assert row["Title"] == title
-        assert len(row["rest"]) == 6
+        assert len(row["rest"]) == 7
