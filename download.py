@@ -187,6 +187,8 @@ Examples:
                         help="Filename pattern (default: default_filename_pattern in config.ini): {0}=output_dir, {1}=content_doc_id, {2}=title, {3}=extension, {4}=linked_entity_name, {5}=version_number, {6}=linked_entity_id")
     parser.add_argument("-fe", "--filter_file_extension", metavar='FILTER', default=None,
                         help="Filter by file type, e.g. \"'EXCEL_M', 'EXCEL'\" (Salesforce FileType values). Prefix with ^ to exclude, e.g. \"'^JSON'\"")
+    parser.add_argument("--metadata-only", action='store_true',
+                        help="Write files.csv without downloading the files (CLI mode; in batch mode use '--extra --metadata-only')")
     parser.add_argument("--deploy", action='store_true',
                         help="Run deploy automatically after download completes")
     parser.add_argument("--extra", nargs=argparse.REMAINDER,
@@ -232,6 +234,8 @@ def run_cli_mode(args, config: configparser.ConfigParser) -> bool:
     ]
     if args.filter_file_extension:
         cmd.extend(['-fe', args.filter_file_extension])
+    if args.metadata_only:
+        cmd.append('--metadata-only')
     logger.info(f"CLI mode command: {' '.join(cmd)}")
     console.print(f":rocket: [cyan]Running:[/cyan] {' '.join(cmd)}")
     console.print()

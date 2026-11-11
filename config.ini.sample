@@ -27,3 +27,8 @@ default_filename_pattern = {0}{1}-{2}.{3}
 # Prefix a value with ^ to exclude it (e.g. "'^JSON'" = everything except JSON)
 # Leave empty for no filter (will exclude .snote by default)
 default_file_extension_filter =
+
+# Optional: adds an S3Uri column to files.csv pointing at the file in a Heimdall backup bucket
+# ({s3_base_uri}{checksum[:4]}/{checksum}.{extension}). Leave empty to omit the column.
+# s3_base_uri = s3://<bucket>/OrgId=<orgid>/Period=0/files/
+s3_base_uri =

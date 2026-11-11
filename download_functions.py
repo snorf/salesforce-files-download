@@ -110,6 +110,21 @@ def build_file_type_condition(file_extension_filter: Optional[str]) -> str:
     return " AND ".join(conditions)
 
 
+def build_s3_uri(s3_base_uri: str, checksum: str, file_extension: str, file_type: str = '') -> str:
+    """
+    Build the S3 URI of a file stored by Heimdall's content-addressable layout:
+    {s3_base_uri}{checksum[:4]}/{checksum}.{extension}
+
+    Mirrors Heimdall's S3Service.buildContentVersionS3KeyByChecksum: the extension is used
+    as-is (FileExtension, falling back to FileType). Returns '' when the key can't be built.
+    """
+    extension = file_extension or file_type
+    if not s3_base_uri or not checksum or not extension:
+        return ''
+    if not s3_base_uri.endswith('/'):
+        s3_base_uri += '/'
+    return f"{s3_base_uri}{checksum[:4]}/{checksum}.{extension}"
+
 
 
 def preflight_checks(config: configparser.ConfigParser, folder_output_directory: str) -> None:
@@ -149,7 +164,8 @@ def fetch_case_fields(sf, case_id: str) -> Tuple[str, str]:
 def download_file(args: Tuple) -> str:
     (
         record, folder_output_directory, sf, results_path,
-        content_document_links, content_document_id_name, filename_pattern
+        content_document_links, content_document_id_name, filename_pattern,
+        metadata_only, s3_base_uri
     ) = args
 
     content_version_old_id = record.get("Id", "UNKNOWN")
@@ -190,9 +206,13 @@ def download_file(args: Tuple) -> str:
         )
         filename = reserve_unique_filename(filename)
 
+        s3_uri = build_s3_uri(s3_base_uri, record.get("Checksum", ""), file_extension, record.get("FileType", ""))
+        if s3_base_uri and not s3_uri:
+            logger.warning(f"No S3 URI for ContentVersion {content_version_old_id} - missing checksum or extension")
+
         # Skip if file exists and checksum matches (no point re-downloading identical files)
         skipped = False
-        if os.path.exists(filename):
+        if not metadata_only and os.path.exists(filename):
             sf_checksum = record.get("Checksum", "")
             if sf_checksum:
                 with open(filename, "rb") as f:
@@ -207,7 +227,7 @@ def download_file(args: Tuple) -> str:
                 logging.debug(f"Skipped (file exists): {filename}")
                 skipped = True
 
-        if not skipped:
+        if not skipped and not metadata_only:
             url = f"https://{getattr(sf, 'sf_instance', 'dummy.salesforce.com')}{record.get('VersionData', '')}"
 
             logging.debug("Downloading from " + url)
@@ -231,17 +251,22 @@ def download_file(args: Tuple) -> str:
             try:
                 with open(results_path, 'a', encoding='UTF-8', newline='') as results_csv:
                     filewriter = csv.writer(results_csv)
-                    filewriter.writerow([
+                    row = [
                         content_version_old_id, linked_entity_id, linked_entity_name, content_document_id, title,
                         filename, filename,
                         linked_entity_type,      # Case or ""
                         case_record_type_name,   # If Case
                         case_contact_id,          # If Case
                         owner_id
-                    ])
+                    ]
+                    if s3_base_uri:
+                        row.append(s3_uri)
+                    filewriter.writerow(row)
             except Exception as ex:
                 logger.error(f"Error writing CSV for {filename}: {ex}")
                 return f"Error writing CSV for {filename}: {ex}"
+        if metadata_only:
+            return f"Recorded metadata for {filename}"
         return "Skipped" if skipped else f"Saved file to {filename}"
     except Exception as ex:
         logger.error(f"Exception downloading file {content_document_id}: {ex}")
@@ -256,7 +281,9 @@ def fetch_files(
     filename_pattern: Optional[str] = None,
     content_document_id_name: str = 'ContentDocumentId',
     batch_size: int = 100,
-    file_extension_filter: Optional[str] = None
+    file_extension_filter: Optional[str] = None,
+    metadata_only: bool = False,
+    s3_base_uri: str = ''
 ) -> None:
     batches = list(split_into_batches(content_document_links or [], batch_size))
     used_filenames.clear()
@@ -268,7 +295,7 @@ def fetch_files(
         logging.info("Processing batch {0}/{1}".format(i, len(batches)))
 
         query_string = (
-            "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, OwnerId, VersionNumber, Checksum "
+            "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, FileType, OwnerId, VersionNumber, Checksum "
             "FROM ContentVersion "
             f"WHERE IsLatest = True AND {build_file_type_condition(file_extension_filter)}"
         )
@@ -321,14 +348,15 @@ def fetch_files(
 
             args_list = [
                 (
-                    record, folder_output_directory, sf, results_path, batch, content_document_id_name, filename_pattern
+                    record, folder_output_directory, sf, results_path, batch, content_document_id_name, filename_pattern,
+                    metadata_only, s3_base_uri
                 ) for record in records
             ]
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 for result in executor.map(download_file, args_list):
                     logging.debug(result)
-                    if result and result.startswith("Saved"):
+                    if result and result.startswith(("Saved", "Recorded")):
                         success_count += 1
                     elif result and result.startswith("Skipped"):
                         skipped_count += 1
@@ -353,6 +381,8 @@ def main():
                         help='Source object for downloaded object')
     parser.add_argument('-fe', '--filter_file_extension', metavar='filter_file_extension', required=False, default=None,
                         help="Filter by file type, e.g. \"'EXCEL_M', 'EXCEL'\" (Salesforce FileType values)")
+    parser.add_argument('--metadata-only', action='store_true',
+                        help='Write files.csv without downloading the files')
     args, extra = parser.parse_known_args()
 
     config = configparser.ConfigParser(allow_no_value=True)
@@ -396,6 +426,9 @@ def main():
         'CaseContactId',          # Case ContactId or blank
         'OwnerId'
     ]
+    s3_base_uri = config['salesforce'].get('s3_base_uri', '') or ''
+    if s3_base_uri:
+        csv_header.append('S3Uri')
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv)
         filewriter.writerow(csv_header)
@@ -425,7 +458,9 @@ def main():
         batch_size=batch_size,
         content_document_id_name=content_document_id_name,
         filename_pattern=args.filenamepattern or config['salesforce'].get('default_filename_pattern') or '{0}{1}-{2}.{3}',
-        file_extension_filter=file_extension_filter if file_extension_filter else None
+        file_extension_filter=file_extension_filter if file_extension_filter else None,
+        metadata_only=args.metadata_only,
+        s3_base_uri=s3_base_uri
     )
 
     if stats and stats["total"] > 0:

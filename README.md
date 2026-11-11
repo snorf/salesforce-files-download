@@ -102,6 +102,9 @@ python download.py --mode cli -q "SELECT Id FROM Case" -so Case -fe "'PDF'"
 # Custom filename pattern (title only, no document ID)
 python download.py --mode cli -q "SELECT Id FROM Account" -so Account -f "{0}{2}.{3}"
 
+# Metadata only: write files.csv without downloading the files
+python download.py --mode cli -q "SELECT Id FROM Case" -so Case --metadata-only
+
 # Download and immediately deploy
 python download.py --mode cli -q "SELECT Id FROM Case LIMIT 10" -so Case --deploy
 ```
@@ -127,6 +130,19 @@ python deploy.py
 | `{6}`       | Linked entity ID    |
 
 Default: `{0}{1}-{2}.{3}` (e.g. `output/069xx-MyFile.pdf`)
+
+### Metadata only with S3 references
+
+When the files are already backed up to S3 by Heimdall, run with `--metadata-only`
+(batch mode: `python download.py --extra --metadata-only`) and set `s3_base_uri` in `config.ini`:
+
+```ini
+s3_base_uri = s3://<bucket>/OrgId=<orgid>/Period=0/files/
+```
+
+`files.csv` then gets an extra `S3Uri` column, `{s3_base_uri}{checksum[:4]}/{checksum}.{extension}`,
+matching Heimdall's content-addressable layout. The extension is `FileExtension` as-is (falling back to
+`FileType`), exactly as Heimdall writes it. Rows without a checksum get an empty `S3Uri`.
 
 ## How It Works
 
