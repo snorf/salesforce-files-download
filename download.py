@@ -183,10 +183,10 @@ Examples:
                         help="Source object name (required for CLI mode)")
     parser.add_argument("-o", "--object", metavar='TYPE', default='ContentDocumentLink',
                         help="How ContentDocuments are selected: 'ContentDocumentLink' (default) or 'ContentDocument'")
-    parser.add_argument("-f", "--filenamepattern", metavar='PATTERN', default='{0}{1}-{2}.{3}',
-                        help="Filename pattern: {0}=output_dir, {1}=content_doc_id, {2}=title, {3}=extension, {4}=linked_entity_name, {5}=version_number")
+    parser.add_argument("-f", "--filenamepattern", metavar='PATTERN', default=None,
+                        help="Filename pattern (default: default_filename_pattern in config.ini): {0}=output_dir, {1}=content_doc_id, {2}=title, {3}=extension, {4}=linked_entity_name, {5}=version_number, {6}=linked_entity_id")
     parser.add_argument("-fe", "--filter_file_extension", metavar='FILTER', default=None,
-                        help="Filter by file type, e.g. \"'EXCEL_M', 'EXCEL'\" (Salesforce FileType values)")
+                        help="Filter by file type, e.g. \"'EXCEL_M', 'EXCEL'\" (Salesforce FileType values). Prefix with ^ to exclude, e.g. \"'^JSON'\"")
     parser.add_argument("--deploy", action='store_true',
                         help="Run deploy automatically after download completes")
     parser.add_argument("--extra", nargs=argparse.REMAINDER,
@@ -201,13 +201,14 @@ def run_cli_mode(args, config: configparser.ConfigParser) -> bool:
     Returns True on success, False on failure.
     """
     console = Console()
+    filename_pattern = args.filenamepattern or config['salesforce'].get('default_filename_pattern') or '{0}{1}-{2}.{3}'
 
     # Build header panel showing query configuration
     config_items = [
         f"[cyan]Source Object:[/cyan] {args.source_object}",
         f"[cyan]Query:[/cyan] {args.query}",
         f"[cyan]Object Type:[/cyan] {args.object}",
-        f"[cyan]Filename Pattern:[/cyan] {args.filenamepattern}",
+        f"[cyan]Filename Pattern:[/cyan] {filename_pattern}",
     ]
     if args.filter_file_extension:
         config_items.append(f"[cyan]File Extension Filter:[/cyan] {args.filter_file_extension}")
@@ -227,7 +228,7 @@ def run_cli_mode(args, config: configparser.ConfigParser) -> bool:
         '-q', args.query,
         '-so', args.source_object,
         '-o', args.object,
-        '-f', args.filenamepattern,
+        '-f', filename_pattern,
     ]
     if args.filter_file_extension:
         cmd.extend(['-fe', args.filter_file_extension])

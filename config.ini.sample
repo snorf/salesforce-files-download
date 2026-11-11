@@ -20,9 +20,10 @@ loglevel = INFO
 
 # Filename pattern placeholders:
 # {0}=output_directory, {1}=content_document_id, {2}=title, {3}=file_extension,
-# {4}=linked_entity_name, {5}=version_number
+# {4}=linked_entity_name, {5}=version_number, {6}=linked_entity_id
 default_filename_pattern = {0}{1}-{2}.{3}
 
 # Filter by Salesforce FileType (e.g. "'EXCEL_M', 'EXCEL'", "'PDF'")
+# Prefix a value with ^ to exclude it (e.g. "'^JSON'" = everything except JSON)
 # Leave empty for no filter (will exclude .snote by default)
 default_file_extension_filter =

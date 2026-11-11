@@ -14,7 +14,7 @@ Python tool to download Salesforce Files (ContentDocument/ContentVersion). Origi
 - **Threaded downloads** — uses ThreadPoolExecutor for parallel file downloads
 - **Filename collision handling** — deterministic `_1`, `_2` suffixes for duplicate titles within a run
 - **Cross-platform filenames** — sanitizes titles for both Windows and Unix
-- **Configurable filename patterns** — placeholders for output dir, document ID, title, extension, linked entity name, version number
+- **Configurable filename patterns** — placeholders for output dir, document ID, title, extension, linked entity name, version number, linked entity ID
 - **File extension filtering** — download only specific file types (e.g. PDF, Excel)
 - **CSV mapping output** — detailed mapping file for each run with ContentVersion IDs, linked entity info, owner, and Case metadata
 - **Special .snote handling** — converts Salesforce Notes to HTML during deploy
@@ -66,6 +66,7 @@ loglevel = INFO
 default_filename_pattern = {0}{1}-{2}.{3}
 
 # Default file extension filter (can be overridden via -fe flag)
+# Prefix a value with ^ to exclude it, e.g. '^JSON' = everything except JSON
 default_file_extension_filter =
 ```
 
@@ -123,6 +124,7 @@ python deploy.py
 | `{3}`       | File extension      |
 | `{4}`       | Linked entity name  |
 | `{5}`       | Version number      |
+| `{6}`       | Linked entity ID    |
 
 Default: `{0}{1}-{2}.{3}` (e.g. `output/069xx-MyFile.pdf`)
 

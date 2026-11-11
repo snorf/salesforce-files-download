@@ -66,6 +66,7 @@ def create_filename(
     file_extension: str,
     linked_entity_name: Optional[str] = None,
     version_number: Optional[str] = None,
+    linked_entity_id: Optional[str] = None,
     filename_pattern: str = '{0}{1}-{2}.{3}'
 ) -> str:
     """
@@ -78,6 +79,7 @@ def create_filename(
         {3} = file_extension
         {4} = linked_entity_name (sanitized)
         {5} = version_number
+        {6} = linked_entity_id
 
     Args:
         output_directory: Directory where the file will be saved
@@ -86,6 +88,7 @@ def create_filename(
         file_extension: File extension (without dot)
         linked_entity_name: Name of the linked entity (optional)
         version_number: ContentVersion version number (optional)
+        linked_entity_id: ID of the linked entity (optional)
         filename_pattern: Pattern string with placeholders
 
     Returns:
@@ -101,6 +104,7 @@ def create_filename(
 
     # Handle None values
     version_str = str(version_number) if version_number else ''
+    linked_entity_id_str = str(linked_entity_id) if linked_entity_id else ''
 
     # Build the filename using the pattern
     filename = filename_pattern.format(
@@ -109,7 +113,8 @@ def create_filename(
         clean_title,                # {2}
         file_extension,             # {3}
         clean_linked_entity_name,   # {4}
-        version_str                 # {5}
+        version_str,                # {5}
+        linked_entity_id_str        # {6}
     )
 
     return filename

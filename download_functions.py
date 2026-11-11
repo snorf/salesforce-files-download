@@ -2,6 +2,7 @@ import concurrent.futures
 import hashlib
 import os
 import csv
+import re
 import logging
 import threading
 import argparse
@@ -60,6 +61,53 @@ def split_into_batches(items: List[Any], batch_size: int) -> Generator[List[Any]
     full_list = list(items)
     for i in range(0, len(full_list), batch_size):
         yield full_list[i:i + batch_size]
+
+
+CONTENT_DOCUMENT_LINK_QUERY = (
+    'SELECT ContentDocumentId, LinkedEntityId, LinkedEntity.Name, ContentDocument.Title, ContentDocument.FileExtension '
+    'FROM ContentDocumentLink '
+    'WHERE LinkedEntityId in ({}) AND ContentDocument.IsDeleted = false'
+)
+LIMIT_CLAUSE = re.compile(r'\bLIMIT\s+\d+', re.IGNORECASE)
+
+
+def query_content_document_links(sf: Any, record_query: str, batch_size: int) -> List[Dict[str, Any]]:
+    """Fetch ContentDocumentLinks for the records matched by record_query."""
+    if not LIMIT_CLAUSE.search(record_query):
+        return sf.query_all(CONTENT_DOCUMENT_LINK_QUERY.format(record_query))["records"]
+
+    # Salesforce rejects LIMIT inside a semi-join subquery, so resolve the record IDs first
+    record_ids = [record["Id"] for record in sf.query_all(record_query)["records"]]
+    links = []
+    for batch in split_into_batches(record_ids, batch_size):
+        id_list = ", ".join(f"'{record_id}'" for record_id in batch)
+        links.extend(sf.query_all(CONTENT_DOCUMENT_LINK_QUERY.format(id_list))["records"])
+    return links
+
+
+def build_file_type_condition(file_extension_filter: Optional[str]) -> str:
+    """
+    Build the ContentVersion file type condition from a filter like "'PDF', '^JSON'".
+
+    Plain values are included (FileType IN), values prefixed with ^ are excluded (FileType NOT IN).
+    Without any included values, .snote files are excluded as by default.
+    """
+    included, excluded = [], []
+    for item in (file_extension_filter or '').split(','):
+        value = item.strip().strip("'\"").strip()
+        if value.startswith('^'):
+            excluded.append(value[1:].strip().strip("'\""))
+        elif value:
+            included.append(value)
+
+    conditions = []
+    if included:
+        conditions.append("FileType IN (" + ", ".join(f"'{v}'" for v in included) + ")")
+    else:
+        conditions.append("FileExtension != 'snote'")
+    if excluded:
+        conditions.append("FileType NOT IN (" + ", ".join(f"'{v}'" for v in excluded) + ")")
+    return " AND ".join(conditions)
 
 
 
@@ -137,6 +185,7 @@ def download_file(args: Tuple) -> str:
             file_extension=file_extension,
             linked_entity_name=linked_entity_name,
             version_number=version_number,
+            linked_entity_id=linked_entity_id,
             filename_pattern=filename_pattern
         )
         filename = reserve_unique_filename(filename)
@@ -218,18 +267,11 @@ def fetch_files(
     for i, batch in enumerate(batches, 1):
         logging.info("Processing batch {0}/{1}".format(i, len(batches)))
 
-        if file_extension_filter:
-            query_string = (
-                "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, OwnerId, VersionNumber, Checksum "
-                "FROM ContentVersion "
-                f"WHERE IsLatest = True AND FileType IN ({file_extension_filter})"
-            )
-        else:
-            query_string = (
-                "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, OwnerId, VersionNumber, Checksum "
-                "FROM ContentVersion "
-                "WHERE IsLatest = True AND FileExtension != 'snote'"
-            )
+        query_string = (
+            "SELECT Id, ContentDocumentId, Title, VersionData, FileExtension, OwnerId, VersionNumber, Checksum "
+            "FROM ContentVersion "
+            f"WHERE IsLatest = True AND {build_file_type_condition(file_extension_filter)}"
+        )
 
         batch_query = (
             query_string +
@@ -305,8 +347,8 @@ def main():
                         help='SOQL to limit the valid ContentDocumentIds. Must return the Ids of parent objects.')
     parser.add_argument('-o', '--object', metavar='object', required=False, default='ContentDocumentLink',
                         help="How are the ContentDocument selected, via 'ContentDocumentLink' (default) or directly from 'ContentDocument'")
-    parser.add_argument('-f', '--filenamepattern', metavar='filenamepattern', required=False, default='{0}{1}-{2}.{3}',
-                        help='Specify filename pattern: {0}=output_directory, {1}=content_document_id, {2}=title, {3}=file_extension, {4}=linked_entity_name, {5}=version_number')
+    parser.add_argument('-f', '--filenamepattern', metavar='filenamepattern', required=False, default=None,
+                        help='Specify filename pattern: {0}=output_directory, {1}=content_document_id, {2}=title, {3}=file_extension, {4}=linked_entity_name, {5}=version_number, {6}=linked_entity_id')
     parser.add_argument('-so', '--sourceobject', metavar='sourceobject', required=True, default='',
                         help='Source object for downloaded object')
     parser.add_argument('-fe', '--filter_file_extension', metavar='filter_file_extension', required=False, default=None,
@@ -360,19 +402,15 @@ def main():
 
     # Use generic SOQL for all objects, so no SOQL errors for non-Case objects
     if args.object == 'ContentDocumentLink':
-        content_document_query = (
-            'SELECT ContentDocumentId, LinkedEntityId, LinkedEntity.Name, ContentDocument.Title, ContentDocument.FileExtension '
-            'FROM ContentDocumentLink '
-            f'WHERE LinkedEntityId in ({args.query}) AND ContentDocument.IsDeleted = false'
-        )
+        content_document_links = query_content_document_links(sf, args.query, batch_size)
         content_document_id_name = 'ContentDocumentId'
     elif args.object == 'ContentDocument':
         content_document_query = f'SELECT Id, Title, FileExtension FROM ContentDocument {args.query}'.strip()
+        content_document_links = sf.query_all(content_document_query)["records"]
         content_document_id_name = 'Id'
     else:
         raise ValueError(f'Invalid QueryType {args.object}')
 
-    content_document_links = sf.query_all(content_document_query)["records"]
     logger.info("Found %s total files", len(content_document_links))
     print(f"Found {len(content_document_links)} total files")
 
@@ -386,7 +424,7 @@ def main():
         results_path=results_path,
         batch_size=batch_size,
         content_document_id_name=content_document_id_name,
-        filename_pattern=args.filenamepattern,
+        filename_pattern=args.filenamepattern or config['salesforce'].get('default_filename_pattern') or '{0}{1}-{2}.{3}',
         file_extension_filter=file_extension_filter if file_extension_filter else None
     )
 

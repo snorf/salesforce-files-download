@@ -134,6 +134,28 @@ class TestCreateFilename:
         )
         assert result == "-DOC1"
 
+    def test_linked_entity_id_placeholder_renders_id(self):
+        result = create_filename(
+            output_directory="out",
+            content_document_id="DOC1",
+            title="Spec",
+            file_extension="pdf",
+            linked_entity_id="001ABC",
+            filename_pattern="{0}{6}/{1}-{2}.{3}",
+        )
+        assert result == f"out{os.sep}001ABC/DOC1-Spec.pdf"
+
+    def test_none_linked_entity_id_renders_empty(self):
+        result = create_filename(
+            output_directory="out",
+            content_document_id="DOC1",
+            title="Spec",
+            file_extension="pdf",
+            linked_entity_id=None,
+            filename_pattern="{6}-{1}",
+        )
+        assert result == "-DOC1"
+
     def test_none_version_renders_empty(self):
         result = create_filename(
             output_directory="out",
