@@ -78,6 +78,10 @@ Account,Account
 Case,Case
 ```
 
+Source objects are the records files are linked to. Batch mode stops before clearing the output directory if
+the mapping lists a file object (`ContentVersion`, `ContentDocument`, `ContentDocumentLink`), since Salesforce
+rejects those in the link query.
+
 ## Usage
 
 ### Download — Batch Mode

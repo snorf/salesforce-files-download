@@ -267,7 +267,42 @@ def run_cli_mode(args, config: configparser.ConfigParser) -> bool:
         return False
 
 
-async def run_batch_mode(args, config: configparser.ConfigParser) -> None:
+# Batch mode finds files via ContentDocumentLink.LinkedEntityId IN (SELECT Id FROM <object>),
+# which Salesforce rejects for the file objects themselves (MALFORMED_QUERY)
+FILE_OBJECTS = {'contentversion', 'contentdocument', 'contentdocumentlink'}
+
+
+def load_source_objects(console: Console) -> List[str]:
+    """
+    Reads the source objects from object_mapping.csv and exits on an empty or invalid mapping.
+    Called before the output directory is cleared, so a bad mapping deletes nothing.
+    """
+    object_names: List[str] = []
+    with open(csv_file, mode='r', newline='') as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            source_object = (row.get('Source Org Object') or '').strip()
+            if source_object:
+                object_names.append(source_object)
+            else:
+                console.print("[yellow]Skipping row with empty 'Source Org Object'[/yellow]")
+
+    if not object_names:
+        console.print("[red]No objects found to process. Exiting.[/red]")
+        sys.exit(1)
+
+    file_objects = [name for name in object_names if name.lower() in FILE_OBJECTS]
+    if file_objects:
+        message = (f"{csv_file} lists file object(s) {', '.join(file_objects)} as 'Source Org Object'. "
+                   "Use the objects the files are linked to (e.g. Account, Case).")
+        console.print(f"[red]{message}[/red]")
+        logger.error(message)
+        sys.exit(1)
+
+    return object_names
+
+
+async def run_batch_mode(args, config: configparser.ConfigParser, object_names: List[str]) -> None:
     """
     Run batch mode - process objects from object_mapping.csv with Rich UI.
     """
@@ -276,25 +311,8 @@ async def run_batch_mode(args, config: configparser.ConfigParser) -> None:
 
     logger.info("Starting batch mode with extra_params=%s", extra_params)
 
-    tasks: List[Any] = []
-    object_names: List[str] = []
     error_log: List[str] = []
-
-    # Read object mapping from CSV and create download tasks
-    with open(csv_file, mode='r', newline='') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            source_object = row.get('Source Org Object', '').strip()
-            if source_object:
-                object_names.append(source_object)
-            else:
-                console.print("[yellow]Skipping row with empty 'Source Org Object'[/yellow]")
-
     total_objects = len(object_names)
-
-    if total_objects == 0:
-        console.print("[red]No objects found to process. Exiting.[/red]")
-        sys.exit(1)
 
     # Set up the progress bar UI and error panel
     progress = Progress(
@@ -425,8 +443,9 @@ async def main() -> None:
     config = load_config()
 
     if args.mode == 'batch':
+        object_names = load_source_objects(console)
         prepare_output_directory(config)
-        await run_batch_mode(args, config)
+        await run_batch_mode(args, config, object_names)
     else:  # CLI mode
         success = run_cli_mode(args, config)
         if args.deploy and success:
