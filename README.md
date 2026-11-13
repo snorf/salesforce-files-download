@@ -159,10 +159,30 @@ download_url_pattern = s3://<bucket>/OrgId=<orgid>/Period=0/files/{checksum_pref
 | `{extension}`          | FileExtension as-is, falling back to FileType         |
 
 Rows where a value used by the pattern is missing (e.g. no checksum) get an empty `DownloadUrl`.
-Note that the `VersionData` column in `files.csv` holds the local file path, not a URL.
 
-After `DownloadUrl`, every row has `Checksum` (MD5 of the content, to verify a download) and
-`ContentSize` (bytes). The run summary prints the total size of all exported files, e.g.
+A metadata-only `files.csv` uses plain Salesforce column names and has no local paths, since nothing is
+downloaded and it is not meant for `deploy.py` (`--deploy` is rejected together with `--metadata-only`):
+
+| Column               | Value                                                        |
+| -------------------- | ------------------------------------------------------------ |
+| `ContentVersionId`   | ContentVersion ID                                            |
+| `LinkedEntityId`     | ID of the record the file is linked to                       |
+| `LinkedEntityName`   | Name of that record                                          |
+| `ContentDocumentId`  | ContentDocument ID                                           |
+| `Title`              | File title (usually without extension)                       |
+| `FileExtension`      | File extension, empty if Salesforce has none                 |
+| `LinkedEntityType`   | `Case` for Cases, otherwise empty                            |
+| `CaseRecordTypeName` | Case record type name (Cases only)                           |
+| `CaseContactId`      | Case contact ID (Cases only)                                 |
+| `OwnerId`            | File owner                                                   |
+| `DownloadUrl`        | Built from `download_url_pattern`                            |
+| `Checksum`           | MD5 of the content, to verify a download                     |
+| `ContentSize`        | Size in bytes                                                |
+
+A normal download keeps the columns `deploy.py` reads (`ContentVersionOldId`, `FirstPublicationId`,
+`PathOnClient`, ...) and also has `DownloadUrl`, `Checksum` and `ContentSize` at the end.
+
+The run summary prints the total size of all exported files, e.g.
 `Total size: 12.4 GB (13314398617 bytes in 48210 files)`.
 
 ## How It Works

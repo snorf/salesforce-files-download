@@ -8,7 +8,9 @@ from download_functions import (
     build_file_type_condition,
     DEFAULT_DOWNLOAD_URL_PATTERN,
     build_download_url,
+    csv_header,
     download_file,
+    METADATA_CSV_HEADER,
     fetch_files,
     format_size,
     query_content_document_links,
@@ -235,7 +237,8 @@ def _run_download_file(tmp_path, metadata_only, download_url_pattern=DEFAULT_DOW
         record or _record(), str(tmp_path) + "/", FakeSessionSalesforce(), str(results_path),
         links, "ContentDocumentId", "{0}{1}-{2}.{3}", metadata_only, download_url_pattern,
     ))
-    rows = list(csv.reader(results_path.open(encoding="UTF-8")))
+    # restkey collects values beyond the header, so a row/header length mismatch shows up as an "EXTRA" key
+    rows = list(csv.DictReader(results_path.open(encoding="UTF-8"), fieldnames=csv_header(metadata_only), restkey="EXTRA"))
     return result, rows
 
 
@@ -246,61 +249,103 @@ def no_http(monkeypatch):
     monkeypatch.setattr(requests, "get", fail_get)
 
 
-DOWNLOAD_URL, CHECKSUM_COLUMN, CONTENT_SIZE = 11, 12, 13
+@pytest.fixture
+def fake_http(monkeypatch):
+    class Response:
+        ok = True
+        content = b"%PDF"
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: Response())
 
 
 class TestDownloadFileMetadataOnly:
-    def test_checksum_and_content_size_are_the_last_columns(self, tmp_path, no_http):
+    def test_checksum_and_content_size_are_written(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, metadata_only=True)
 
-        assert len(rows[0]) == 14
-        assert rows[0][CHECKSUM_COLUMN] == CHECKSUM
-        assert rows[0][CONTENT_SIZE] == "29491"
+        assert rows[0]["Checksum"] == CHECKSUM
+        assert rows[0]["ContentSize"] == "29491"
 
     def test_missing_checksum_and_size_are_written_as_empty(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, True, record=_record(Checksum=None, ContentSize=None))
 
-        assert rows[0][CHECKSUM_COLUMN] == ""
-        assert rows[0][CONTENT_SIZE] == ""
+        assert rows[0]["Checksum"] == ""
+        assert rows[0]["ContentSize"] == ""
 
     def test_empty_file_size_is_written_as_zero(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, True, record=_record(ContentSize=0))
 
-        assert rows[0][CONTENT_SIZE] == "0"
+        assert rows[0]["ContentSize"] == "0"
 
     def test_metadata_only_writes_csv_row_without_http_request(self, tmp_path, no_http):
         result, rows = _run_download_file(tmp_path, metadata_only=True)
 
         assert result.startswith("Recorded")
-        assert rows[0][0] == "068A"
+        assert rows[0]["ContentVersionId"] == "068A"
         assert not (tmp_path / "069A-Report.pdf").exists()
+
+    def test_metadata_only_uses_plain_salesforce_names_and_no_local_paths(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, metadata_only=True)
+
+        assert "EXTRA" not in rows[0]
+        assert rows[0]["ContentVersionId"] == "068A"
+        assert rows[0]["LinkedEntityId"] == "001A"
+        assert rows[0]["LinkedEntityName"] == "Acme"
+        assert not {"ContentVersionOldId", "FirstPublicationId", "VersionData", "PathOnClient"} & set(METADATA_CSV_HEADER)
+
+    def test_metadata_only_has_file_extension_since_title_usually_lacks_it(self, tmp_path, no_http):
+        _, rows = _run_download_file(tmp_path, metadata_only=True)
+
+        assert rows[0]["FileExtension"] == "pdf"
+
+    @pytest.mark.parametrize("file_extension", ["", None])
+    def test_missing_file_extension_is_written_as_empty(self, tmp_path, no_http, file_extension):
+        _, rows = _run_download_file(tmp_path, True, record=_record(FileExtension=file_extension))
+
+        assert rows[0]["FileExtension"] == ""
 
     def test_download_url_defaults_to_salesforce_rest_url(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, metadata_only=True)
 
-        assert rows[0][DOWNLOAD_URL] == f"https://{INSTANCE}/services/data/v60.0/sobjects/ContentVersion/068A/VersionData"
+        assert rows[0]["DownloadUrl"] == f"https://{INSTANCE}/services/data/v60.0/sobjects/ContentVersion/068A/VersionData"
 
     def test_download_url_follows_configured_pattern(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, metadata_only=True, download_url_pattern=S3_PATTERN)
 
-        assert rows[0][DOWNLOAD_URL] == f"s3://bucket/OrgId=00Dxx/Period=0/files/0000/{CHECKSUM}.pdf"
+        assert rows[0]["DownloadUrl"] == f"s3://bucket/OrgId=00Dxx/Period=0/files/0000/{CHECKSUM}.pdf"
 
     def test_missing_checksum_gives_empty_download_url_but_row_is_written(self, tmp_path, no_http):
         _, rows = _run_download_file(tmp_path, True, S3_PATTERN, record=_record(Checksum=""))
 
-        assert rows[0][0] == "068A"
-        assert rows[0][DOWNLOAD_URL] == ""
+        assert rows[0]["ContentVersionId"] == "068A"
+        assert rows[0]["DownloadUrl"] == ""
 
     def test_title_with_comma_and_quote_round_trips_through_dict_reader(self, tmp_path, no_http):
+        title = 'Offer, "final" | v2'
+
+        _, rows = _run_download_file(tmp_path, True, record=_record(Title=title))
+
+        assert rows[0]["Title"] == title
+        assert "EXTRA" not in rows[0]
+
+
+class TestDownloadFileDeployFormat:
+    def test_download_mode_keeps_the_columns_deploy_reads(self, tmp_path, fake_http):
+        # deploy_functions.py reads these by name; renaming them breaks deploy.py
+        result, rows = _run_download_file(tmp_path, metadata_only=False)
+
+        assert result.startswith("Saved")
+        assert "EXTRA" not in rows[0]
+        assert rows[0]["ContentVersionOldId"] == "068A"
+        assert rows[0]["FirstPublicationId"] == "001A"
+        assert rows[0]["PathOnClient"] == str(tmp_path / "069A-Report.pdf")
+
+    def test_title_with_comma_and_quote_round_trips_for_deploy(self, tmp_path, fake_http):
         # deploy.py reads files.csv with csv.DictReader defaults, so the writer must use standard quoting
         title = 'Offer, "final" | v2'
 
-        _run_download_file(tmp_path, True, record=_record(Title=title))
+        _, rows = _run_download_file(tmp_path, False, record=_record(Title=title))
 
-        fields = ["ContentVersionOldId", "FirstPublicationId", "FirstPublicationName", "ContentDocumentId", "Title"]
-        row = next(csv.DictReader((tmp_path / "files.csv").open(encoding="UTF-8"), fieldnames=fields, restkey="rest"))
-        assert row["Title"] == title
-        assert len(row["rest"]) == 9
+        assert rows[0]["Title"] == title
+        assert "EXTRA" not in rows[0]
 
 
 class FakeContentVersionSalesforce(FakeSessionSalesforce):

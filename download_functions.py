@@ -200,6 +200,32 @@ def fetch_case_fields(sf, case_id: str) -> Tuple[str, str]:
     return "", ""
 
 
+# files.csv columns. Download mode is read by deploy.py (ContentVersionOldId, FirstPublicationId, PathOnClient),
+# so its names must not change. Metadata-only output is for other systems: plain Salesforce names, no local paths.
+DOWNLOAD_CSV_HEADER = [
+    'ContentVersionOldId', 'FirstPublicationId', 'FirstPublicationName', 'ContentDocumentId', 'Title',
+    'VersionData', 'PathOnClient',
+    'LinkedEntityType',      # Case or blank
+    'CaseRecordTypeName',    # Case RecordType.Name or blank
+    'CaseContactId',         # Case ContactId or blank
+    'OwnerId',
+    'DownloadUrl',
+    'Checksum',              # MD5 of the file content
+    'ContentSize',           # bytes
+]
+METADATA_CSV_HEADER = [
+    'ContentVersionId', 'LinkedEntityId', 'LinkedEntityName', 'ContentDocumentId', 'Title',
+    'FileExtension',
+    'LinkedEntityType', 'CaseRecordTypeName', 'CaseContactId',
+    'OwnerId',
+    'DownloadUrl', 'Checksum', 'ContentSize',
+]
+
+
+def csv_header(metadata_only: bool) -> List[str]:
+    return METADATA_CSV_HEADER if metadata_only else DOWNLOAD_CSV_HEADER
+
+
 def download_file(args: Tuple) -> str:
     (
         record, folder_output_directory, sf, results_path,
@@ -285,23 +311,33 @@ def download_file(args: Tuple) -> str:
                 logger.error(msg)
                 return msg
 
+        values = {
+            'ContentVersionOldId': content_version_old_id,
+            'ContentVersionId': content_version_old_id,
+            'FirstPublicationId': linked_entity_id,
+            'LinkedEntityId': linked_entity_id,
+            'FirstPublicationName': linked_entity_name,
+            'LinkedEntityName': linked_entity_name,
+            'ContentDocumentId': content_document_id,
+            'Title': title,
+            'FileExtension': file_extension or "",
+            'VersionData': filename,
+            'PathOnClient': filename,
+            'LinkedEntityType': linked_entity_type,
+            'CaseRecordTypeName': case_record_type_name,
+            'CaseContactId': case_contact_id,
+            'OwnerId': owner_id,
+            'DownloadUrl': download_url,
+            'Checksum': record.get("Checksum") or "",
+            'ContentSize': "" if record.get("ContentSize") is None else record["ContentSize"],
+        }
+
         # Write file entry to csv (for both downloaded and skipped files)
         with csv_writer_lock:
             try:
                 with open(results_path, 'a', encoding='UTF-8', newline='') as results_csv:
                     filewriter = csv.writer(results_csv)
-                    row = [
-                        content_version_old_id, linked_entity_id, linked_entity_name, content_document_id, title,
-                        filename, filename,
-                        linked_entity_type,      # Case or ""
-                        case_record_type_name,   # If Case
-                        case_contact_id,          # If Case
-                        owner_id,
-                        download_url,
-                        record.get("Checksum") or "",
-                        "" if record.get("ContentSize") is None else record["ContentSize"]
-                    ]
-                    filewriter.writerow(row)
+                    filewriter.writerow([values[column] for column in csv_header(metadata_only)])
             except Exception as ex:
                 logger.error(f"Error writing CSV for {filename}: {ex}")
                 return f"Error writing CSV for {filename}: {ex}"
@@ -464,20 +500,9 @@ def main():
 
     logger.info('Output directory: ' + folder_output_directory)
     results_path = os.path.join(folder_output_directory, 'files.csv')
-    csv_header = [
-        'ContentVersionOldId', 'FirstPublicationId', 'FirstPublicationName', 'ContentDocumentId', 'Title',
-        'VersionData', 'PathOnClient',
-        'LinkedEntityType',      # Case or blank
-        'CaseRecordTypeName',    # Case RecordType.Name or blank
-        'CaseContactId',          # Case ContactId or blank
-        'OwnerId',
-        'DownloadUrl',
-        'Checksum',              # MD5 of the file content
-        'ContentSize'            # bytes
-    ]
     with open(results_path, 'w', encoding='UTF-8', newline='') as results_csv:
         filewriter = csv.writer(results_csv)
-        filewriter.writerow(csv_header)
+        filewriter.writerow(csv_header(args.metadata_only))
 
     # Use generic SOQL for all objects, so no SOQL errors for non-Case objects
     if args.object == 'ContentDocumentLink':

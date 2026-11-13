@@ -194,7 +194,10 @@ Examples:
     parser.add_argument("--extra", nargs=argparse.REMAINDER,
                         help="Extra parameters to pass through to download_functions.py (batch mode only, after '--extra')",
                         default=[])
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.deploy and (args.metadata_only or '--metadata-only' in args.extra):
+        parser.error("--deploy needs downloaded files and cannot be combined with --metadata-only")
+    return args
 
 
 def run_cli_mode(args, config: configparser.ConfigParser) -> bool:
